@@ -230,6 +230,99 @@ def neals_funnel(ndim: int = 10) -> Target:
     )
 
 
+def rosenbrock(ndim: int = 4, a: float = 1.0, b: float = 100.0) -> Target:
+    """Rosenbrock (banana-shaped) distribution.
+
+    log p(x) = -sum_i [b*(x_{i+1} - x_i^2)^2 + (a - x_i)^2]
+    Strongly curved, narrow valley — challenging for axis-aligned methods.
+    """
+    def log_prob(x):
+        return -jnp.sum(
+            b * (x[1:] - x[:-1] ** 2) ** 2 + (a - x[:-1]) ** 2
+        )
+
+    def sample(key, n):
+        # No closed-form sampler; use approximate Gaussian around mode
+        # Mode is at (a, a^2, a^4, ...) but we just init near (1,1,...)
+        return jax.random.normal(key, (n, ndim), dtype=jnp.float64) * 0.5 + a
+
+    return Target(
+        log_prob=log_prob,
+        sample=sample,
+        ndim=ndim,
+        name=f"rosenbrock_d{ndim}",
+        mean=jnp.ones(ndim) * a,
+        cov=None,
+    )
+
+
+def ill_conditioned_gaussian(ndim: int = 10, condition: float = 1000.0) -> Target:
+    """Ill-conditioned Gaussian with specified condition number.
+
+    Eigenvalues span from 1 to `condition`, creating a distribution
+    that is very elongated along one axis and compressed along another.
+    """
+    rng = np.random.default_rng(123)
+    A = rng.standard_normal((ndim, ndim))
+    Q, _ = np.linalg.qr(A)
+    evals = np.geomspace(1.0, condition, ndim)
+    cov = Q @ np.diag(evals) @ Q.T
+    cov = (cov + cov.T) / 2
+
+    prec = np.linalg.inv(cov)
+    L = np.linalg.cholesky(cov)
+    mu = np.zeros(ndim)
+
+    prec_jnp = jnp.array(prec, dtype=jnp.float64)
+    L_jnp = jnp.array(L, dtype=jnp.float64)
+    mu_jnp = jnp.array(mu, dtype=jnp.float64)
+
+    def log_prob(x):
+        d = x - mu_jnp
+        return -0.5 * d @ prec_jnp @ d
+
+    def sample(key, n):
+        z = jax.random.normal(key, (n, ndim), dtype=jnp.float64)
+        return z @ L_jnp.T + mu_jnp
+
+    return Target(
+        log_prob=log_prob,
+        sample=sample,
+        ndim=ndim,
+        name=f"ill_conditioned_d{ndim}_cond{condition:.0f}",
+        mean=jnp.array(mu),
+        cov=jnp.array(cov),
+    )
+
+
+def ring_distribution(scale: float = 2.0, width: float = 0.3) -> Target:
+    """2D ring (donut) distribution.
+
+    log p(x) = -(||x|| - scale)^2 / (2 * width^2)
+    Tests ability to handle curved, non-convex geometry.
+    """
+    ndim = 2
+
+    def log_prob(x):
+        r = jnp.sqrt(jnp.sum(x ** 2) + 1e-30)
+        return -(r - scale) ** 2 / (2 * width ** 2)
+
+    def sample(key, n):
+        k1, k2 = jax.random.split(key)
+        theta = jax.random.uniform(k1, (n,), dtype=jnp.float64) * 2 * jnp.pi
+        r = scale + jax.random.normal(k2, (n,), dtype=jnp.float64) * width
+        return jnp.stack([r * jnp.cos(theta), r * jnp.sin(theta)], axis=1)
+
+    return Target(
+        log_prob=log_prob,
+        sample=sample,
+        ndim=ndim,
+        name=f"ring_scale{scale:.0f}",
+        mean=jnp.zeros(ndim),
+        cov=None,
+    )
+
+
 # Registry for easy iteration in tests
 ALL_TARGETS = {
     "isotropic_10": lambda: isotropic_gaussian(10),
@@ -238,4 +331,7 @@ ALL_TARGETS = {
     "student_t_10": lambda: student_t(10),
     "mixture_5": lambda: gaussian_mixture(5),
     "funnel_10": lambda: neals_funnel(10),
+    "rosenbrock_4": lambda: rosenbrock(4),
+    "ill_conditioned_10": lambda: ill_conditioned_gaussian(10),
+    "ring_2": lambda: ring_distribution(),
 }
