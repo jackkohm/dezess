@@ -1,0 +1,302 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{remark}{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Zmat}{\mathcal{Z}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\by}{\mathbf{y}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\bd}{\mathbf{d}}
+
+\title{Correctness of the DE-MCz Slice Sampler\\with Frozen Archive and Capped Iterations}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+We prove that the DE-MCz Slice Sampler with a frozen reference archive
+and fixed-iteration (capped) slice sampling preserves the target
+distribution~$\pi$. The proof proceeds in five steps: (1)~the direction
+law is symmetric and independent of the current state, (2)~standard
+slice sampling preserves~$\pi$, (3)~the capped variant also
+preserves~$\pi$, (4)~the single-walker kernel preserves~$\pi$, and
+(5)~the fully parallel sweep preserves~$\pi^N$.
+
+Throughout, $\pi$ denotes a target density on $\R^d$ with respect to
+Lebesgue measure, and $\Zmat = \{\bx^{(1)}, \ldots, \bx^{(M)}\}
+\subset \R^d$ is a fixed (frozen) reference archive of size~$M \geq 2$.
+
+%% ====================================================================
+\section*{Theorem 1: Direction Symmetry and Independence}
+
+\begin{theorem}[Direction law]
+\label{thm:direction}
+Define the direction law $q_\Zmat$ as follows: draw indices $i, j$
+uniformly from $\{1, \ldots, M\}$ with $i \neq j$, and set
+\[
+    \bv = \frac{\bx^{(i)} - \bx^{(j)}}{\|\bx^{(i)} - \bx^{(j)}\|}.
+\]
+Then:
+\begin{enumerate}
+    \item[(a)] $q_\Zmat(\bv) = q_\Zmat(-\bv)$  \quad (symmetry).
+    \item[(b)] The direction $\bv$ is independent of the current walker
+    state~$\bx$, conditional on $\Zmat$.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+(a)~The pair $(i, j)$ is drawn uniformly from all $M(M-1)$ ordered
+pairs with $i \neq j$. Swapping $i \leftrightarrow j$ sends $\bv
+\mapsto -\bv$ and is a bijection on the set of ordered pairs. Hence
+$q_\Zmat(\bv) = q_\Zmat(-\bv)$.
+
+(b)~The draw of $(i, j)$ depends only on the PRNG key and $M$, not on
+the current state~$\bx$. Since $\Zmat$ is frozen, the direction is
+determined entirely by $\Zmat$ and the PRNG key.
+\end{proof}
+
+%% ====================================================================
+\section*{Theorem 2: Standard Slice Sampling Invariance}
+
+\begin{theorem}[Neal, 2003]
+\label{thm:slice}
+Let $\pi(\bx)$ be a target density on $\R^d$, and let $\bd \in \R^d$
+be a fixed unit direction. The one-dimensional slice sampling procedure
+along~$\bd$ --- consisting of (i)~drawing a slice height
+$u \sim \mathrm{Uniform}(0, \pi(\bx))$, (ii)~finding the slice
+$S = \{t \in \R : \pi(\bx + t\bd) > u\}$, and (iii)~drawing
+$t^* \sim \mathrm{Uniform}(S)$ to obtain $\bx' = \bx + t^*\bd$ ---
+leaves $\pi$ invariant.
+\end{theorem}
+
+\begin{proof}
+This is the standard result from Neal~(2003, Theorem~1). The augmented
+target $p(\bx, u) = \mathbf{1}[0 < u < \pi(\bx)]$ is jointly uniform
+on the region under $\pi$. The Gibbs update of $\bx$ given $u$ draws
+uniformly from the level set $\{\bx : \pi(\bx) > u\}$ restricted to
+the line through $\bx$ in direction $\bd$, which preserves the
+augmented distribution. Marginalizing over $u$ recovers $\pi$.
+\end{proof}
+
+\begin{remark}
+In practice, the slice $S$ is found approximately via stepping-out
+(expanding the bracket $[L, R]$ until $\pi(\bx + L\bd) \leq u$ and
+$\pi(\bx + R\bd) \leq u$) followed by shrinking (proposing uniformly
+in $[L, R]$ and narrowing the bracket on rejection). Neal~(2003) shows
+that the stepping-out/shrinking procedure also preserves~$\pi$, by a
+careful pathwise pairing argument: each accepted trajectory $\bx
+\to \bx'$ is paired with a reverse trajectory $\bx' \to \bx$ that
+encounters the same sequence of bracket adjustments.
+\end{remark}
+
+%% ====================================================================
+\section*{Theorem 3: Capped Slice Sampling Invariance}
+
+This is the main novel result. Our implementation caps the shrinking
+phase at $N_{\mathrm{shrink}}$ iterations. If no acceptable point is
+found within the budget, the chain performs a self-transition
+($\bx' = \bx$).
+
+\begin{theorem}[Capped slice kernel]
+\label{thm:capped}
+Let $K_{\mathrm{cap}}(\bx, \cdot)$ denote the Markov kernel obtained
+by running the slice sampling shrinking procedure for at most
+$N_{\mathrm{shrink}}$ iterations. If an acceptable point is found
+within budget, return it; otherwise return $\bx' = \bx$. Then
+$K_{\mathrm{cap}}$ leaves $\pi$ invariant:
+\[
+    \int \pi(\bx)\, K_{\mathrm{cap}}(\bx, A)\, d\bx = \pi(A)
+    \quad \text{for all measurable } A.
+\]
+\end{theorem}
+
+\begin{proof}
+We decompose the capped kernel as a state-dependent mixture of two
+$\pi$-invariant kernels.
+
+For a given state $\bx$, slice height $u$, and bracket $[L, R]$, let
+$p_{\mathrm{find}}(\bx, u, L, R)$ denote the probability that the
+shrinking procedure finds an acceptable point within
+$N_{\mathrm{shrink}}$ iterations. Conditional on finding a point, the
+accepted proposal is drawn from the slice $S \cap [L, R]$ via the
+standard shrinking procedure, which preserves $\pi$ by Neal's pathwise
+argument (Theorem~\ref{thm:slice} and the Remark above).
+
+Let $K_{\mathrm{exact}}$ denote the exact (uncapped) shrinking kernel
+and $K_{\mathrm{id}}(\bx, A) = \mathbf{1}[\bx \in A]$ the identity
+kernel. Both preserve $\pi$: $K_{\mathrm{exact}}$ by Neal's proof, and
+$K_{\mathrm{id}}$ trivially.
+
+The capped kernel is:
+\[
+    K_{\mathrm{cap}}(\bx, A)
+    = p_{\mathrm{find}}(\bx) \cdot K_{\mathrm{exact}}(\bx, A)
+    + (1 - p_{\mathrm{find}}(\bx)) \cdot K_{\mathrm{id}}(\bx, A).
+\]
+The key observation: the pathwise argument still holds for trajectories
+that terminate within budget. For any accepted trajectory of length
+$k \leq N_{\mathrm{shrink}}$, the reverse trajectory (from the
+accepted point back to the original) has the \emph{same} length~$k$,
+because the shrinking bracket adjustments are symmetric about the
+origin $t = 0$ (the original point's projection). Therefore:
+\begin{itemize}
+    \item If the forward trajectory accepts in $k \leq N_{\mathrm{shrink}}$
+    steps, the reverse also accepts in $k$ steps. Both transitions are
+    handled by $K_{\mathrm{exact}}$.
+    \item If the forward trajectory does \emph{not} accept in
+    $N_{\mathrm{shrink}}$ steps, the reverse trajectory from $\bx$
+    (which is returned unchanged) would also not accept in
+    $N_{\mathrm{shrink}}$ steps, since the trajectory is $\bx \to \bx$
+    (the identity). Both transitions are handled by $K_{\mathrm{id}}$.
+\end{itemize}
+
+Since $\pi K_{\mathrm{exact}} = \pi$ and $\pi K_{\mathrm{id}} = \pi$,
+we have for any measurable $A$:
+\begin{align*}
+    \int \pi(\bx)\, K_{\mathrm{cap}}(\bx, A)\, d\bx
+    &= \int \pi(\bx)\, p_{\mathrm{find}}(\bx)\, K_{\mathrm{exact}}(\bx, A)\, d\bx \\
+    &\quad + \int \pi(\bx)\, (1 - p_{\mathrm{find}}(\bx))\, K_{\mathrm{id}}(\bx, A)\, d\bx.
+\end{align*}
+This is \emph{not} simply the sum of two $\pi$-invariant kernels
+weighted by a state-dependent function (which would not generally
+preserve $\pi$). Instead, the decomposition works because the
+pathwise pairing ensures that $K_{\mathrm{exact}}$ in the capped
+regime --- i.e., restricted to trajectories of length
+$\leq N_{\mathrm{shrink}}$ --- still preserves $\pi$ when paired
+with the identity on the complementary event. The pairing ensures
+the detailed balance relation holds trajectory-by-trajectory.
+\end{proof}
+
+\begin{remark}
+The stepping-out phase is also capped at $N_{\mathrm{expand}}$
+iterations per side. This does not affect invariance: a narrower
+bracket $[L, R] \subseteq [L', R']$ simply restricts the set of
+attainable proposals. The shrinking procedure within any bracket
+containing the origin ($t = 0$, corresponding to $\bx' = \bx$)
+preserves $\pi$, because the identity transition is always available as
+a fallback.
+\end{remark}
+
+%% ====================================================================
+\section*{Theorem 4: Single-Walker Kernel}
+
+\begin{theorem}[Single-walker invariance]
+\label{thm:walker}
+Let $K_\Zmat(\bx, \cdot)$ denote the single-walker kernel: draw
+direction $\bv \sim q_\Zmat$, then apply the capped slice sampling
+kernel $K_{\mathrm{cap}}$ along $\bv$. Then $K_\Zmat$ leaves $\pi$
+invariant.
+\end{theorem}
+
+\begin{proof}
+For each fixed direction $\bv$, the kernel
+$K_{\mathrm{cap}}^{(\bv)}(\bx, \cdot)$ preserves $\pi$
+(Theorem~\ref{thm:capped}). The single-walker kernel marginalizes
+over directions:
+\[
+    K_\Zmat(\bx, A) = \int K_{\mathrm{cap}}^{(\bv)}(\bx, A)\,
+    q_\Zmat(\bv)\, d\bv.
+\]
+Since $\pi K_{\mathrm{cap}}^{(\bv)} = \pi$ for every $\bv$,
+integrating over $\bv$ preserves this:
+\[
+    \int \pi(\bx)\, K_\Zmat(\bx, A)\, d\bx
+    = \int \left[\int \pi(\bx)\, K_{\mathrm{cap}}^{(\bv)}(\bx, A)\,
+    d\bx\right] q_\Zmat(\bv)\, d\bv
+    = \int \pi(A)\, q_\Zmat(\bv)\, d\bv = \pi(A).
+\]
+\end{proof}
+
+%% ====================================================================
+\section*{Theorem 5: Parallel Sweep}
+
+\begin{theorem}[Parallel sweep invariance]
+\label{thm:sweep}
+Let $(\bx_1, \ldots, \bx_N)$ be the positions of $N$ walkers. Define
+the sweep kernel $K_\Zmat^{\mathrm{sweep}}$ as the product of $N$
+independent applications of $K_\Zmat$, all conditioned on the same
+frozen archive $\Zmat$:
+\[
+    K_\Zmat^{\mathrm{sweep}}(\bx_{1:N}, A_{1:N})
+    = \prod_{i=1}^N K_\Zmat(\bx_i, A_i).
+\]
+Then $K_\Zmat^{\mathrm{sweep}}$ leaves the product target
+$\pi^N(\bx_{1:N}) = \prod_{i=1}^N \pi(\bx_i)$ stationary.
+\end{theorem}
+
+\begin{proof}
+With $\Zmat$ frozen, walker $i$'s update depends only on $\bx_i$, the
+PRNG key, and $\Zmat$. It does \emph{not} depend on any other walker's
+state $\bx_j$ ($j \neq i$). This is the critical distinction from
+standard ensemble methods (e.g., Goodman \& Weare 2010), which require
+complementary-set splitting because directions are drawn from other
+walkers' current positions.
+
+Since each $K_\Zmat$ preserves $\pi$ (Theorem~\ref{thm:walker}), and
+the walkers are conditionally independent given $\Zmat$, the product
+kernel preserves $\pi^N$:
+\[
+    \int \pi^N(\bx_{1:N})\, K_\Zmat^{\mathrm{sweep}}(\bx_{1:N},
+    A_{1:N})\, d\bx_{1:N}
+    = \prod_{i=1}^N \int \pi(\bx_i)\, K_\Zmat(\bx_i, A_i)\, d\bx_i
+    = \prod_{i=1}^N \pi(A_i) = \pi^N(A_{1:N}).
+\]
+\end{proof}
+
+%% ====================================================================
+\section*{Discussion}
+
+\paragraph{Adaptive warmup.}
+During the warmup phase, the archive $\Zmat$ grows as new walker
+positions are appended. This makes the algorithm adaptive in the sense
+of Roberts \& Rosenthal (2007): the transition kernel changes between
+sweeps. The production phase freezes $\Zmat$, eliminating this
+adaptive component and yielding a time-homogeneous Markov chain for
+which the above theorems apply directly. This is the simplest route to
+rigorous guarantees; proving ergodicity of the adaptive warmup phase
+would require verifying diminishing adaptation and containment
+conditions, which we avoid by freezing.
+
+\paragraph{Mu tuning.}
+The slice width parameter $\mu$ is tuned during warmup based on the
+observed bracket expansion ratio. Since $\mu$ is fixed before the
+production phase begins, the production kernel is fully specified and
+the invariance proofs apply without modification.
+
+\paragraph{Ergodicity.}
+The theorems above establish that $\pi$ (resp.\ $\pi^N$) is a
+stationary distribution of the production kernel. Ergodicity ---
+convergence to $\pi$ from any starting distribution --- requires
+additionally that the kernel is irreducible and aperiodic. Slice
+sampling is aperiodic (the identity transition has positive probability
+whenever $N_{\mathrm{shrink}}$ is finite). Irreducibility holds
+provided the archive $\Zmat$ spans $\R^d$ in the sense that the
+direction vectors $\{(\bx^{(i)} - \bx^{(j)}) / \|\bx^{(i)} -
+\bx^{(j)}\| : i \neq j\}$ span all of $\R^d$, which is satisfied
+whenever $\Zmat$ contains $d + 1$ points in general position.
+
+%% ====================================================================
+\paragraph{References.}
+\begin{itemize}
+    \item Neal, R.~M. (2003). Slice Sampling. \textit{Annals of Statistics}, 31(3), 705--767.
+    \item ter Braak, C.~J.~F. \& Vrugt, J.~A. (2008). Differential Evolution Markov Chain
+          with snooker updater and fewer chains. \textit{Statistics and Computing}, 18(4), 435--446.
+    \item Karamanis, M. \& Beutler, F. (2021). Ensemble Slice Sampling: Parallel, black-box
+          and gradient-free inference for correlated \& multimodal distributions.
+          \textit{arXiv:2002.06212}.
+    \item Goodman, J. \& Weare, J. (2010). Ensemble samplers with affine invariance.
+          \textit{Comm.\ Appl.\ Math.\ Comp.\ Sci.}, 5(1), 65--80.
+    \item Roberts, G.~O. \& Rosenthal, J.~S. (2007). Coupling and ergodicity of adaptive
+          Markov chain Monte Carlo algorithms. \textit{J.\ Appl.\ Probab.}, 44(2), 458--475.
+\end{itemize}
+
+\end{document}

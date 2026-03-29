@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dezess"
+version = "0.1.0"
+description = "DE-MCz Slice Sampler: fully GPU-parallel ensemble slice sampling in JAX"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+  "jax>=0.4",
+  "jaxlib>=0.4",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=7.0",
+  "scipy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+include = ["dezess*"]
+
+[tool.pytest.ini_options]
+testpaths = ["dezess/tests"]

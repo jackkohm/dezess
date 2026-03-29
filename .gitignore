@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+*.egg
+
+# Artifacts (large files, not tracked)
+artifacts/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Existing project dirs (not part of dezess)
+givemepotential/
+Agama/
+*.pkl
+*.hdf5
+*.h5
+*.npy
+*.npz
+*.tar.gz
+*.tgz
+*.zip
+*.so
+*.c
+*.log
+*.png
+*.pdf
+*.csv
+slurm_*.out
+slurm_*.err
