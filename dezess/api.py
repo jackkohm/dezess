@@ -544,6 +544,21 @@ def _resolve_variant(variant: str, n_dim: int) -> VariantConfig:
             ensemble="standard",
             width_kwargs={"scale_factor": 1.0},
         )
+    elif variant == "lean":
+        # Maximum ESS per evaluation (very expensive log-probs).
+        # Uses minimal slice budget (5 evals/step). ~3% cap-hit rate
+        # on easy targets, higher on funnels. Best when each log-prob
+        # call costs seconds.
+        return VariantConfig(
+            name="scale_aware_lean",
+            direction="de_mcz",
+            width="scale_aware",
+            slice_fn="fixed",
+            zmatrix="circular",
+            ensemble="standard",
+            width_kwargs={"scale_factor": 1.0},
+            slice_kwargs={"n_expand": 1, "n_shrink": 3},
+        )
     elif variant == "fast":
         # Best ESS per evaluation (for expensive log-probs)
         return VariantConfig(

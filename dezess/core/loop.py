@@ -153,9 +153,15 @@ def run_variant(
     zmat_kwargs = dict(config.zmatrix_kwargs)
     ens_kwargs = dict(config.ensemble_kwargs)
 
-    # Slice budget (may be tuned during warmup for adaptive_budget)
-    n_expand = slice_kwargs.pop("n_expand", 3)
-    n_shrink = slice_kwargs.pop("n_shrink", 12)
+    # Slice budget (may be tuned during warmup for adaptive_budget).
+    # scale_aware width produces well-calibrated brackets, so fewer
+    # expand/shrink iterations are needed (2/8 vs 3/12 default).
+    if config.width == "scale_aware" and "n_expand" not in slice_kwargs and "n_shrink" not in slice_kwargs:
+        n_expand = slice_kwargs.pop("n_expand", 2)
+        n_shrink = slice_kwargs.pop("n_shrink", 8)
+    else:
+        n_expand = slice_kwargs.pop("n_expand", 3)
+        n_shrink = slice_kwargs.pop("n_shrink", 12)
 
     # Initialize Z-matrix
     z_padded = jnp.zeros((z_max_size, n_dim), dtype=jnp.float64)
