@@ -23,6 +23,7 @@ import numpy as np
 
 from dezess.core.loop import run_variant
 from dezess.core.types import VariantConfig
+from dezess.transforms import Transform
 
 jax.config.update("jax_enable_x64", True)
 
@@ -77,6 +78,7 @@ def sample(
     seed: int = 0,
     verbose: bool = True,
     progress_fn: Optional[Callable] = None,
+    transform: Optional[Transform] = None,
     **kwargs,
 ) -> SampleResult:
     """Draw posterior samples using dezess.
@@ -179,6 +181,7 @@ def sample(
         target_ess=target_ess,
         progress_fn=progress_fn,
         verbose=verbose,
+        transform=transform,
         **kwargs,
     )
 

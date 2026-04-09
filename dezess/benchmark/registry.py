@@ -351,6 +351,46 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=3,
     ),
+
+    # --- Funnel / block-structure variants ---
+    "block_gibbs": VariantConfig(
+        name="block_gibbs",
+        direction="de_mcz",
+        width="scalar",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
+    ),
+    "block_gibbs_scale_aware": VariantConfig(
+        name="block_gibbs_scale_aware",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
+    ),
+    "transform_scale_aware": VariantConfig(
+        name="transform_scale_aware",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+    ),
+    "block_gibbs_transform": VariantConfig(
+        name="block_gibbs_transform",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
+    ),
 }
 
 
@@ -375,7 +415,8 @@ VARIANT_SETS = {
     "width_variants": ["baseline", "stochastic_width", "stochastic_width_wide", "per_direction_width"],
     "direction_variants": ["baseline", "snooker", "weighted_pair", "momentum_03", "momentum_05", "pca_directions"],
     "slice_variants": ["baseline", "adaptive_budget", "delayed_rejection"],
-    "ensemble_variants": ["baseline", "parallel_tempering"],
+    "ensemble_variants": ["baseline", "parallel_tempering", "block_gibbs", "block_gibbs_scale_aware"],
+    "funnel_variants": ["scale_aware", "block_gibbs", "block_gibbs_scale_aware", "transform_scale_aware", "block_gibbs_transform"],
     "combined_variants": ["baseline", "snooker_stochastic", "momentum_delayed", "pca_per_direction", "full_kitchen_sink"],
     "all": list(VARIANTS.keys()),
 }

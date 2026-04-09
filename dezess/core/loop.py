@@ -24,6 +24,7 @@ from jax import lax
 from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
+from dezess.transforms import Transform, identity
 
 # Direction modules
 from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction
@@ -35,7 +36,8 @@ from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejectio
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
-from dezess.ensemble import standard as standard_ensemble, parallel_tempering
+from dezess.ensemble import standard as standard_ensemble, parallel_tempering, block_gibbs
+from dezess.core.slice_sample import slice_sample_fixed
 
 jax.config.update("jax_enable_x64", True)
 
@@ -82,6 +84,7 @@ ZMATRIX_STRATEGIES = {
 ENSEMBLE_STRATEGIES = {
     "standard": standard_ensemble,
     "parallel_tempering": parallel_tempering,
+    "block_gibbs": block_gibbs,
 }
 
 
@@ -110,6 +113,7 @@ def run_variant(
     target_ess: Optional[float] = None,
     progress_fn: Optional[Callable] = None,
     verbose: bool = True,
+    transform: Optional[Transform] = None,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -128,6 +132,13 @@ def run_variant(
     if key is None:
         key = jax.random.PRNGKey(0)
     mu = jnp.float64(mu)
+
+    # --- Transform setup ---
+    if transform is not None:
+        init_positions = jax.vmap(transform.inverse)(init_positions)
+        _original_log_prob = log_prob_fn
+        def log_prob_fn(z, _fwd=transform.forward, _ldj=transform.log_det_jac, _lp=_original_log_prob):
+            return _lp(_fwd(z)) + _ldj(z)
 
     # Resolve strategies (validate names early for clear error messages)
     for name, registry, label in [
@@ -401,6 +412,79 @@ def run_variant(
             pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
         )
 
+    # --- Block-Gibbs setup ---
+    use_block_gibbs = config.ensemble == "block_gibbs"
+
+    if use_block_gibbs:
+        blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
+        n_blocks_val = len(blocks)
+        mu_blocks = block_gibbs.init_mu_blocks(n_blocks_val, float(mu))
+
+        # Pad blocks to same size for scan compatibility
+        max_block_size = max(len(b) for b in blocks)
+        padded_blocks = jnp.zeros((n_blocks_val, max_block_size), dtype=jnp.int32)
+        block_sizes_arr = jnp.array([len(b) for b in blocks], dtype=jnp.int32)
+        for i, b in enumerate(blocks):
+            padded_blocks = padded_blocks.at[i, :len(b)].set(b)
+
+        @jax.jit
+        def block_sweep_step(positions, log_probs, z_padded, z_count,
+                             mu_blocks_arg, key):
+
+            def _one_block(carry, block_data):
+                pos, lps, k = carry
+                block_idx, bsize, mu_b = block_data
+                b_idx = padded_blocks[block_idx]  # (max_block_size,)
+                # Mask: 1 for valid block indices, 0 for padding
+                mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
+
+                def _update_walker(x_full, lp, wk):
+                    wk, k1, k2 = jax.random.split(wk, 3)
+                    idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+
+                    # Direction in block subspace (full padded size)
+                    z1_block = z_padded[idx1][b_idx]  # (max_block_size,)
+                    z2_block = z_padded[idx2][b_idx]
+                    diff = (z1_block - z2_block) * mask  # zero out padding
+                    norm = jnp.sqrt(jnp.sum(diff**2))
+                    d_block = diff / jnp.maximum(norm, 1e-30)
+
+                    # Embed into full space: scatter block direction
+                    d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    d_full = d_full.at[b_idx].add(d_block * mask)
+
+                    # Scale-aware width
+                    dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
+                    mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    # Slice sample
+                    x_new, lp_new, wk, found, L, R = slice_sample_fixed(
+                        lambda x: safe_log_prob(log_prob_fn, x),
+                        x_full, d_full, lp, mu_eff, wk,
+                        n_expand=n_expand, n_shrink=n_shrink,
+                    )
+                    br = (R - L) / jnp.maximum(mu_eff, 1e-30)
+                    return x_new, lp_new, wk, br
+
+                k, k_walkers = jax.random.split(k)
+                wkeys = jax.random.split(k_walkers, n_walkers)
+                new_pos, new_lp, _, brs = jax.vmap(_update_walker)(pos, lps, wkeys)
+                mean_br = jnp.mean(brs)
+                return (new_pos, new_lp, k), mean_br
+
+            # Shuffle block order
+            k, k_perm = jax.random.split(key)
+            perm = jax.random.permutation(k_perm, n_blocks_val)
+            block_data = (perm, block_sizes_arr[perm], mu_blocks_arg[perm])
+
+            (pos_out, lps_out, k_out), all_br = jax.lax.scan(
+                _one_block, (positions, log_probs, k), block_data,
+            )
+            mean_br = jnp.mean(all_br)
+            return pos_out, lps_out, k_out, mean_br
+
     # --- Initial log-probs ---
     if verbose:
         print(f"  [{config.name}] Computing initial log-probs...", flush=True)
@@ -412,20 +496,38 @@ def run_variant(
     z_log_probs = z_log_probs.at[:n_walkers].set(log_probs)
 
     # --- JIT compile ---
-    step_fn = _make_step_fn(n_expand, n_shrink)
-    if verbose:
-        print(f"  [{config.name}] JIT compiling...", flush=True)
-    t_jit = time.time()
-    (positions, log_probs, key, _, _,
-     walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
-        step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-        mu, key, walker_aux.prev_direction, walker_aux.bracket_widths,
-        walker_aux.direction_anchor, walker_aux.direction_scale, temperatures,
-    )
-    positions.block_until_ready()
-    t_jit = time.time() - t_jit
-    if verbose:
-        print(f"  [{config.name}] JIT compile: {t_jit:.1f}s", flush=True)
+    if use_block_gibbs:
+        # JIT compile block_sweep_step
+        if verbose:
+            print(f"  [{config.name}] JIT compiling block_sweep_step...", flush=True)
+        t_jit = time.time()
+        positions, log_probs, key, _ = block_sweep_step(
+            positions, log_probs, z_padded, z_count, mu_blocks, key,
+        )
+        positions.block_until_ready()
+        t_jit = time.time() - t_jit
+        if verbose:
+            print(f"  [{config.name}] JIT compile: {t_jit:.1f}s", flush=True)
+        # Dummy aux values (not used by block-Gibbs but needed for variable scope)
+        walker_aux_pd = walker_aux.prev_direction
+        walker_aux_bw = walker_aux.bracket_widths
+        walker_aux_da = walker_aux.direction_anchor
+        walker_aux_ds = walker_aux.direction_scale
+    else:
+        step_fn = _make_step_fn(n_expand, n_shrink)
+        if verbose:
+            print(f"  [{config.name}] JIT compiling...", flush=True)
+        t_jit = time.time()
+        (positions, log_probs, key, _, _,
+         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
+            step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
+            mu, key, walker_aux.prev_direction, walker_aux.bracket_widths,
+            walker_aux.direction_anchor, walker_aux.direction_scale, temperatures,
+        )
+        positions.block_until_ready()
+        t_jit = time.time() - t_jit
+        if verbose:
+            print(f"  [{config.name}] JIT compile: {t_jit:.1f}s", flush=True)
 
     # Update Z after JIT warmup step
     z_padded, z_count, z_log_probs = circular_zmatrix.append(
@@ -463,25 +565,34 @@ def run_variant(
 
     t_sample = time.time()
     for step in range(n_warmup):
-        # Linear temperature schedule
-        if warmup_t_start > 1.0 and n_warmup > 0:
-            frac = step / max(n_warmup - 1, 1)
-            warmup_temp = warmup_t_start * (1.0 - frac) + 1.0 * frac
-            warmup_temperatures = jnp.full(n_walkers, warmup_temp, dtype=jnp.float64)
+        if use_block_gibbs:
+            # Block-Gibbs warmup step
+            positions, log_probs, key, br_mean = block_sweep_step(
+                positions, log_probs, z_padded, z_count, mu_blocks, key,
+            )
+            # Fake found/br for compatibility with downstream code
+            found = jnp.ones(n_walkers, dtype=jnp.bool_)
+            br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
         else:
-            warmup_temperatures = temperatures
+            # Linear temperature schedule
+            if warmup_t_start > 1.0 and n_warmup > 0:
+                frac = step / max(n_warmup - 1, 1)
+                warmup_temp = warmup_t_start * (1.0 - frac) + 1.0 * frac
+                warmup_temperatures = jnp.full(n_walkers, warmup_temp, dtype=jnp.float64)
+            else:
+                warmup_temperatures = temperatures
 
-        (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
-            step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            walker_aux_ds, warmup_temperatures,
-        )
+            (positions, log_probs, key, found, br,
+             walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
+                step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
+                mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                walker_aux_ds, warmup_temperatures,
+            )
 
-        # During warmup tempering, the stored lp_new is tempered (log_prob / temp).
-        # Re-evaluate at T=1 so the next step sees the correct untempered value.
-        if warmup_t_start > 1.0 and warmup_temp > 1.001:
-            log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
+            # During warmup tempering, the stored lp_new is tempered (log_prob / temp).
+            # Re-evaluate at T=1 so the next step sees the correct untempered value.
+            if warmup_t_start > 1.0 and warmup_temp > 1.001:
+                log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
 
         # Append to Z-matrix (every 5 steps to reduce overhead)
         if step % 5 == 0 or step == n_warmup - 1:
@@ -498,9 +609,17 @@ def run_variant(
         esjd_ema = 0.3 * esjd + 0.7 * esjd_ema
         prev_positions = positions
 
-        # Tune mu
+        # Tune mu (or mu_blocks for block-Gibbs)
         if tune and (step + 1) % TUNE_INTERVAL == 0:
-            if config.tune_method == "esjd":
+            if use_block_gibbs:
+                # Scale all mu_blocks by the same bracket-ratio adjustment
+                med_ratio = float(jnp.median(br))
+                ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
+                if ratio_ema > 0:
+                    adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
+                    mu_blocks = jnp.clip(mu_blocks * adjustment, MU_MIN, MU_MAX)
+                    mu = jnp.float64(jnp.mean(mu_blocks))
+            elif config.tune_method == "esjd":
                 if esjd_ema > best_esjd:
                     best_esjd = esjd_ema
                     best_mu = mu
@@ -546,7 +665,8 @@ def run_variant(
 
     # Warmup auto-extension: if ESJD is still changing rapidly or mu
     # hasn't stabilized, extend warmup by up to 2x the original length.
-    if tune and n_warmup > 100 and esjd_ema > 0:
+    # (Not used for block-Gibbs which has its own mu_blocks tuning.)
+    if tune and n_warmup > 100 and esjd_ema > 0 and not use_block_gibbs:
         # Check: is mu still changing significantly between tune intervals?
         # Use the last bracket_ratio as a proxy — if it's far from target,
         # warmup hasn't converged.
@@ -648,7 +768,8 @@ def run_variant(
         needs_rejit = True
 
     # Re-JIT if budget changed or PCA/flow directions updated
-    if needs_rejit or config.direction in ("pca", "flow", "whitened", "kde"):
+    # (skip for block-Gibbs which uses its own JIT-compiled step)
+    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde")):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
@@ -687,8 +808,9 @@ def run_variant(
     # Build a batched scan step for reduced Python overhead.
     # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
     SCAN_BATCH = 50
-    # scan doesn't support swaps or live Z-matrix (Z changes each step)
-    use_scan = (config.ensemble != "parallel_tempering") and not live_z
+    # scan doesn't support swaps, live Z-matrix, or block-Gibbs
+    # (block-Gibbs permutes blocks each step so can't batch)
+    use_scan = (config.ensemble not in ("parallel_tempering", "block_gibbs")) and not live_z
 
     if use_scan:
         @jax.jit
@@ -741,14 +863,22 @@ def run_variant(
                 stream_diag.update(b_samples[i], b_lps[i])
             step_idx += batch_sz
         else:
-            # Single step (fallback for parallel tempering or last batch)
-            (positions, log_probs, key, found, br,
-             walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
-                positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
-                mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-                walker_aux_ds, temperatures,
-                pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
-            )
+            # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
+            if use_block_gibbs:
+                positions, log_probs, key, br_mean = block_sweep_step(
+                    positions, log_probs, z_frozen, z_count_frozen,
+                    mu_blocks, key,
+                )
+                found = jnp.ones(n_walkers, dtype=jnp.bool_)
+                br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
+            else:
+                (positions, log_probs, key, found, br,
+                 walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
+                    positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
+                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                    walker_aux_ds, temperatures,
+                    pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                )
             if config.ensemble == "parallel_tempering":
                 key, k_swap = jax.random.split(key)
                 positions, log_probs = parallel_tempering.propose_swaps(
@@ -812,7 +942,15 @@ def run_variant(
 
     wall_time = time.time() - t_prod
 
-    return {
+    # --- Map samples back to x-space ---
+    if transform is not None:
+        all_samples_x = np.zeros_like(all_samples[:n_production])
+        _fwd_vmap = jax.jit(jax.vmap(transform.forward))
+        for i in range(n_production):
+            all_samples_x[i] = np.asarray(_fwd_vmap(jnp.array(all_samples[i])))
+        all_samples[:n_production] = all_samples_x
+
+    result = {
         "samples": jnp.array(all_samples[:n_production]),
         "log_prob": jnp.array(all_log_probs[:n_production]),
         "mu": float(mu),
@@ -829,3 +967,6 @@ def run_variant(
             "streaming": stream_diag.summary(),
         },
     }
+    if use_block_gibbs:
+        result["mu_blocks"] = np.array(mu_blocks)
+    return result
