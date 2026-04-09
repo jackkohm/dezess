@@ -136,9 +136,12 @@ def sample(
     init_positions = jnp.array(init_positions, dtype=jnp.float64)
     n_walkers_init, n_dim = init_positions.shape
 
-    # Auto-set warmup
+    # Auto-set warmup: scale with dimension for high-dim problems
     if n_warmup is None:
-        n_warmup = max(500, n_samples // 4)
+        base_warmup = max(500, n_samples // 4)
+        # High-dim needs more warmup to fill Z-matrix with diverse samples
+        dim_factor = max(1.0, n_dim / 20.0)  # 1x at 20D, 3x at 60D
+        n_warmup = int(base_warmup * dim_factor)
 
     # Auto-select variant
     config = _resolve_variant(variant, n_dim)
