@@ -201,6 +201,60 @@ def sample(
     )
 
 
+def diagnose(result: SampleResult) -> None:
+    """Print a diagnostic summary of the sampling result.
+
+    Checks for common issues and provides actionable recommendations.
+    """
+    print(f"\n{'='*60}")
+    print(f"  dezess diagnostic summary")
+    print(f"{'='*60}")
+
+    n_steps = result.n_steps
+    n_walkers = result.samples.shape[1] if result.samples.ndim == 3 else 0
+    n_dim = result.samples.shape[2] if result.samples.ndim == 3 else result.samples.shape[1]
+    n_total = n_steps * n_walkers if n_walkers > 0 else n_steps
+
+    print(f"  Steps: {n_steps}, Walkers: {n_walkers}, Dim: {n_dim}")
+    print(f"  Total draws: {n_total:,}")
+    print(f"  Wall time: {result.wall_time:.1f}s")
+    print(f"  Variant: {result.variant}")
+    print()
+
+    # ESS check
+    ess = result.ess_min
+    print(f"  ESS (min): {ess:.0f}")
+    if ess >= 400:
+        print(f"    OK — sufficient for most posterior summaries")
+    elif ess >= 100:
+        print(f"    MARGINAL — consider more production steps")
+    else:
+        print(f"    LOW — need significantly more steps or better tuning")
+
+    # R-hat check
+    rhat = result.rhat_max
+    print(f"  R-hat (max): {rhat:.4f}")
+    if rhat < 1.01:
+        print(f"    EXCELLENT — chains well-converged")
+    elif rhat < 1.05:
+        print(f"    GOOD — chains likely converged")
+    elif rhat < 1.1:
+        print(f"    MARGINAL — consider more warmup")
+    else:
+        print(f"    POOR — chains have not converged. Try:")
+        print(f"      - More warmup steps")
+        print(f"      - More walkers")
+        print(f"      - Different initialization")
+
+    # Efficiency
+    if result.wall_time > 0:
+        ess_per_sec = ess / result.wall_time
+        print(f"  ESS/s: {ess_per_sec:.1f}")
+
+    print(f"  Tuned mu: {result.mu:.6f}")
+    print(f"{'='*60}\n")
+
+
 def init_walkers(
     n_walkers: int,
     n_dim: int,
