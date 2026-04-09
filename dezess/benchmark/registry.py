@@ -275,7 +275,8 @@ TARGET_SETS = {
         "funnel_10", "rosenbrock_4", "ill_conditioned_10", "ring_2",
     ],
     "hard": ["funnel_10", "rosenbrock_4", "ill_conditioned_10", "mixture_5"],
-    "high_dim": ["isotropic_30"],
+    "high_dim": ["isotropic_30", "isotropic_60", "correlated_30", "correlated_60",
+                  "ill_conditioned_30", "ill_conditioned_60"],
 }
 
 
