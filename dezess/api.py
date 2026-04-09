@@ -216,6 +216,112 @@ def sample(
     )
 
 
+def sample_until(
+    log_prob_fn: Callable[[Array], Array],
+    init_positions: Array,
+    target_ess: float = 400,
+    max_rhat: float = 1.05,
+    max_steps: int = 50000,
+    batch_size: int = 1000,
+    variant: str = "auto",
+    seed: int = 0,
+    verbose: bool = True,
+    **kwargs,
+) -> SampleResult:
+    """Sample until convergence criteria are met.
+
+    Runs production in batches, checking ESS and R-hat after each batch.
+    Stops when both criteria are satisfied or max_steps is reached.
+
+    Parameters
+    ----------
+    target_ess : float
+        Minimum ESS to achieve. Default 400.
+    max_rhat : float
+        Maximum acceptable R-hat. Default 1.05.
+    max_steps : int
+        Maximum total production steps. Default 50000.
+    batch_size : int
+        Steps per batch. Default 1000.
+    """
+    n_walkers, n_dim = jnp.array(init_positions).shape
+
+    # Auto warmup
+    n_warmup = kwargs.pop("n_warmup", None)
+    if n_warmup is None:
+        base_warmup = max(500, batch_size // 2)
+        dim_factor = max(1.0, n_dim / 20.0)
+        n_warmup = int(base_warmup * dim_factor)
+
+    all_samples = []
+    all_lps = []
+    total_steps = 0
+    current_init = jnp.array(init_positions, dtype=jnp.float64)
+    mu = 1.0
+    z_matrix = None
+
+    while total_steps < max_steps:
+        steps_this_batch = min(batch_size, max_steps - total_steps)
+
+        result = run_variant(
+            log_prob_fn,
+            current_init,
+            n_steps=steps_this_batch + (n_warmup if total_steps == 0 else 0),
+            config=_resolve_variant(variant, n_dim),
+            n_warmup=n_warmup if total_steps == 0 else 0,
+            key=jax.random.PRNGKey(seed + total_steps),
+            mu=mu,
+            tune=total_steps == 0,
+            z_initial=z_matrix,
+            verbose=verbose,
+            **kwargs,
+        )
+
+        all_samples.append(np.asarray(result["samples"]))
+        all_lps.append(np.asarray(result["log_prob"]))
+        total_steps += result["n_production"]
+        mu = result["mu"]
+        z_matrix = np.asarray(result["z_matrix"])
+        current_init = jnp.array(np.asarray(result["samples"])[-1])
+
+        # Check convergence
+        combined = np.concatenate(all_samples, axis=0)
+        combined_lps = np.concatenate(all_lps, axis=0)
+        from dezess.diagnostics import StreamingDiagnostics
+        stream = StreamingDiagnostics(n_walkers, n_dim)
+        for i in range(combined.shape[0]):
+            stream.update(combined[i], combined_lps[i])
+        diag = stream.summary()
+
+        ess = diag["ess_min"]
+        rhat = diag["rhat_max"]
+
+        if verbose:
+            print(f"dezess.sample_until: {total_steps} steps, "
+                  f"ESS={ess:.0f}/{target_ess:.0f}, "
+                  f"R-hat={rhat:.3f}/{max_rhat:.3f}", flush=True)
+
+        if ess >= target_ess and rhat <= max_rhat:
+            if verbose:
+                print(f"dezess.sample_until: converged!", flush=True)
+            break
+
+    combined = np.concatenate(all_samples, axis=0)
+    combined_lps = np.concatenate(all_lps, axis=0)
+
+    return SampleResult(
+        samples=combined,
+        log_prob=combined_lps,
+        ess_min=ess,
+        ess_mean=diag["ess_mean"],
+        rhat_max=rhat,
+        n_steps=total_steps,
+        wall_time=0.0,
+        mu=mu,
+        variant=variant,
+    )
+
+
 def run_chains(
     log_prob_fn: Callable[[Array], Array],
     init_positions: Array,
