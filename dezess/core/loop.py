@@ -539,42 +539,93 @@ def run_variant(
     # Streaming diagnostics for live ESS/R-hat monitoring
     stream_diag = StreamingDiagnostics(n_walkers, n_dim)
 
-    t_prod = time.time()
-    for step in range(n_production):
-        (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
-            positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
-            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions, whitening_matrix,
-        )
+    # Build a batched scan step for reduced Python overhead.
+    # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
+    SCAN_BATCH = 50
+    use_scan = (config.ensemble != "parallel_tempering")  # scan doesn't support swaps
 
-        # Replica exchange swaps
-        if config.ensemble == "parallel_tempering":
-            key, k_swap = jax.random.split(key)
-            positions, log_probs = parallel_tempering.propose_swaps(
-                positions, log_probs, temperatures, k_swap,
-                n_temps=ens_kwargs.get("n_temps", 4),
+    if use_scan:
+        @jax.jit
+        def _scan_steps(carry, _):
+            (pos, lps, k, pd, bw, da, ds) = carry
+            (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
+                pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
+                mu, k, pd, bw, da, ds, temperatures,
+                pca_components, pca_weights, flow_directions, whitening_matrix,
             )
+            return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
-        pos_np = np.asarray(positions)
-        all_samples[step] = pos_np
-        all_log_probs[step] = np.asarray(log_probs)
-        all_found[step] = np.asarray(found)
-        all_bracket_ratios[step] = np.asarray(br)
+        def _run_batch(positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                       walker_aux_da, walker_aux_ds, n_batch):
+            carry = (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                     walker_aux_da, walker_aux_ds)
+            carry, outputs = jax.lax.scan(_scan_steps, carry, None, length=n_batch)
+            (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+             walker_aux_da, walker_aux_ds) = carry
+            batch_samples, batch_lps, batch_found, batch_br = outputs
+            return (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                    walker_aux_da, walker_aux_ds,
+                    batch_samples, batch_lps, batch_found, batch_br)
 
-        # Update streaming diagnostics
-        stream_diag.update(pos_np)
+    t_prod = time.time()
+    step_idx = 0
 
-        if verbose and ((step + 1) % 200 == 0 or step == n_production - 1):
+    while step_idx < n_production:
+        # Determine batch size
+        remaining = n_production - step_idx
+        batch_sz = min(SCAN_BATCH, remaining) if use_scan else 1
+
+        if use_scan and batch_sz > 1:
+            # Batched scan
+            (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+             walker_aux_da, walker_aux_ds,
+             batch_samples, batch_lps, batch_found, batch_br) = _run_batch(
+                positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                walker_aux_da, walker_aux_ds, batch_sz,
+            )
+            b_samples = np.asarray(batch_samples)
+            b_lps = np.asarray(batch_lps)
+            b_found = np.asarray(batch_found)
+            b_br = np.asarray(batch_br)
+            for i in range(batch_sz):
+                all_samples[step_idx + i] = b_samples[i]
+                all_log_probs[step_idx + i] = b_lps[i]
+                all_found[step_idx + i] = b_found[i]
+                all_bracket_ratios[step_idx + i] = b_br[i]
+                stream_diag.update(b_samples[i])
+            step_idx += batch_sz
+        else:
+            # Single step (fallback for parallel tempering or last batch)
+            (positions, log_probs, key, found, br,
+             walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
+                positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
+                mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                walker_aux_ds, temperatures,
+                pca_components, pca_weights, flow_directions, whitening_matrix,
+            )
+            if config.ensemble == "parallel_tempering":
+                key, k_swap = jax.random.split(key)
+                positions, log_probs = parallel_tempering.propose_swaps(
+                    positions, log_probs, temperatures, k_swap,
+                    n_temps=ens_kwargs.get("n_temps", 4),
+                )
+            pos_np = np.asarray(positions)
+            all_samples[step_idx] = pos_np
+            all_log_probs[step_idx] = np.asarray(log_probs)
+            all_found[step_idx] = np.asarray(found)
+            all_bracket_ratios[step_idx] = np.asarray(br)
+            stream_diag.update(pos_np)
+            step_idx += 1
+
+        if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
             elapsed = time.time() - t_prod
-            speed = (step + 1) / elapsed
-            eta = (n_production - step - 1) / speed if speed > 0 else 0
-            best = float(all_log_probs[:step+1].max())
-            mean_lp = float(all_log_probs[max(0,step-199):step+1].mean())
-            zero_rate = 1.0 - all_found[max(0,step-199):step+1].mean()
+            speed = step_idx / elapsed if elapsed > 0 else 0
+            eta = (n_production - step_idx) / speed if speed > 0 else 0
+            best = float(all_log_probs[:step_idx].max())
+            mean_lp = float(all_log_probs[max(0,step_idx-200):step_idx].mean())
+            zero_rate = 1.0 - all_found[max(0,step_idx-200):step_idx].mean()
             diag = stream_diag.summary()
-            print(f"  [{config.name}] {step+1:6d}/{n_production} "
+            print(f"  [{config.name}] {step_idx:6d}/{n_production} "
                   f"({speed:.1f} it/s, ETA {eta:.0f}s) "
                   f"best_lp={best:.1f} mean_lp={mean_lp:.1f} "
                   f"zero_move={zero_rate:.4f} "
