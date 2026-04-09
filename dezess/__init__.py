@@ -5,7 +5,7 @@ __version__ = "0.2.0"
 from dezess.sampler import run_demcz_slice
 from dezess.core.loop import run_variant, DEFAULT_CONFIG
 from dezess.core.types import VariantConfig
-from dezess.api import sample, SampleResult, init_walkers, diagnose
+from dezess.api import sample, SampleResult, init_walkers, diagnose, run_chains
 from dezess.utils import (
     LogProbCounter,
     flatten_samples, thin_samples, summary_stats, print_summary,
@@ -20,6 +20,7 @@ __all__ = [
     "SampleResult",
     "init_walkers",
     "diagnose",
+    "run_chains",
     "flatten_samples",
     "thin_samples",
     "summary_stats",
