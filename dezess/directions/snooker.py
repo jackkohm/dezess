@@ -1,10 +1,13 @@
 """Snooker direction (ter Braak & Vrugt 2008).
 
-Projects the DE-MCz difference vector through the current point,
-concentrating proposals toward posterior mass. The direction points
-from a random Z-matrix entry through x_i, which biases moves toward
-high-density regions while preserving detailed balance via the
-Jacobian correction handled in the slice sampling step.
+Slice sampling along the line connecting z_r1 (a random archived state)
+and the current walker x_i.  Because the line is parameterised radially
+from z_r1, the d-dimensional volume element picks up a Jacobian factor
+|x - z_r1|^{d-1}.  The caller (loop.py) adds this correction to the
+slice log-density so the kernel samples from the correct target.
+
+Requires the Jacobian correction: the anchor z_r1 is returned via
+aux.direction_anchor so the caller can compute it.
 """
 
 from __future__ import annotations
@@ -28,11 +31,11 @@ def sample_direction(
     aux: Array,
     **kwargs,
 ) -> tuple[Array, Array, Array]:
-    """Snooker direction: project z_r1 through x_i using z_r2 as anchor.
+    """Snooker direction: line from z_r1 through x_i.
 
-    d = x_i - z_r1 (direction from a random past state toward current position),
-    then normalized. This concentrates proposals along the line connecting
-    the current position to past states.
+    d = normalize(x_i - z_r1).  The anchor z_r1 is stored in
+    aux.direction_anchor so the caller can apply the Jacobian
+    correction (ndim-1)*log|x - z_r1| to the slice density.
     """
     key, k_idx1, k_idx2 = jax.random.split(key, 3)
 
@@ -44,7 +47,6 @@ def sample_direction(
     z_r2 = z_matrix[idx2]
 
     # Snooker: direction from z_r1 through x_i
-    # This is the line connecting z_r1 to x_i, extended beyond x_i
     diff = x_i - z_r1
     norm = jnp.sqrt(jnp.sum(diff ** 2))
 
@@ -56,5 +58,10 @@ def sample_direction(
     d_raw = jnp.where(use_snooker, diff, fallback)
     d_norm = jnp.where(use_snooker, norm, fallback_norm)
     d = d_raw / jnp.maximum(d_norm, 1e-30)
+
+    # Store anchor for Jacobian correction; fallback anchor is midpoint
+    # of z_r1 and z_r2 (safe — Jacobian correction is ~0 when unused)
+    anchor = jnp.where(use_snooker, z_r1, (z_r1 + z_r2) / 2.0)
+    aux = aux._replace(direction_anchor=anchor)
 
     return d, key, aux

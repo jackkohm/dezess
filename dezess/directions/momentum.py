@@ -68,6 +68,7 @@ def sample_direction(
     new_aux = WalkerAux(
         prev_direction=d,
         bracket_widths=aux.bracket_widths,
+        direction_anchor=aux.direction_anchor,
     )
 
     return d, key, new_aux
