@@ -460,6 +460,45 @@ def run_variant(
                   f"({speed:.1f} it/s) best_lp={best:.1f} z_count={int(z_count)} "
                   f"mu={float(mu):.4f} bracket_ratio={med_br:.1f}", flush=True)
 
+    # Warmup auto-extension: if ESJD is still changing rapidly or mu
+    # hasn't stabilized, extend warmup by up to 2x the original length.
+    if tune and n_warmup > 100 and esjd_ema > 0:
+        # Check: is mu still changing significantly between tune intervals?
+        # Use the last bracket_ratio as a proxy — if it's far from target,
+        # warmup hasn't converged.
+        last_br = float(jnp.median(br)) if n_warmup > 0 else TARGET_RATIO
+        mu_unstable = abs(last_br - TARGET_RATIO) > TARGET_RATIO * 0.5
+        max_extra = n_warmup  # at most double the warmup
+        extra_done = 0
+
+        if mu_unstable and config.tune_method == "bracket":
+            if verbose:
+                print(f"  [{config.name}] Warmup auto-extending (bracket_ratio={last_br:.1f}, "
+                      f"target={TARGET_RATIO:.1f})...", flush=True)
+            for extra_step in range(max_extra):
+                (positions, log_probs, key, found, br,
+                 walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
+                    step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
+                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                    walker_aux_ds, temperatures,
+                )
+                z_padded, z_count, z_log_probs = circular_zmatrix.append(
+                    z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+                )
+                extra_done += 1
+                if tune and (extra_step + 1) % TUNE_INTERVAL == 0:
+                    med_ratio = float(jnp.median(br))
+                    ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
+                    if ratio_ema > 0:
+                        adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
+                        mu = jnp.clip(mu * adjustment, MU_MIN, MU_MAX)
+                    # Check convergence
+                    if abs(med_ratio - TARGET_RATIO) <= TARGET_RATIO * 0.3:
+                        break
+            if verbose:
+                print(f"  [{config.name}] Extended warmup by {extra_done} steps "
+                      f"(bracket_ratio now {float(jnp.median(br)):.1f})", flush=True)
+
     # Finalize adaptive tuning
     if config.tune_method == "esjd" and tune and n_warmup > 0:
         mu = best_mu
