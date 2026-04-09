@@ -267,6 +267,11 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=2,
     ),
+    # NOTE: coordinate directions tested but underperform DE-MCz on
+    # correlated targets because axis-aligned slices don't follow the
+    # posterior geometry. Available as direction="coordinate" but not
+    # recommended as default.
+
     # NOTE: gradient directions are experimental and NOT recommended.
     # The gradient d = normalize(grad(log_prob)(x)) is state-dependent and
     # radially biased, causing variance contraction (same issue as uncorrected

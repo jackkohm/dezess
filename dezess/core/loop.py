@@ -26,7 +26,7 @@ from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -52,6 +52,7 @@ DIRECTION_STRATEGIES = {
     "flow": flow,
     "whitened": whitened,
     "gradient": gradient,
+    "coordinate": coordinate,
 }
 
 WIDTH_STRATEGIES = {
