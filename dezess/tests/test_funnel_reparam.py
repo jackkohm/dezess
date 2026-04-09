@@ -223,3 +223,105 @@ def test_block_gibbs_block_coupled():
     rhat = compute_rhat(samples)
     rhat_max = float(np.max(rhat))
     assert rhat_max < 1.2, f"Block-Gibbs R-hat={rhat_max:.4f} on block_coupled (want < 1.2)"
+
+
+@pytest.mark.slow
+def test_transform_funnel_63d():
+    """NonCenteredFunnel transform alone on funnel_63d."""
+    from dezess.transforms import multi_funnel
+    from dezess.core.loop import run_variant
+    from dezess.benchmark.registry import VARIANTS
+    from dezess.targets_stream import funnel_63d
+    from dezess.benchmark.metrics import compute_rhat
+
+    target = funnel_63d()
+    t = multi_funnel(n_potential=7, funnel_blocks=[(7, 14), (21, 14), (35, 14), (49, 14)])
+
+    config = VARIANTS["scale_aware"]
+    key = jax.random.PRNGKey(42)
+    init = target.sample(key, 128)
+
+    result = run_variant(
+        target.log_prob, init, n_steps=8000,
+        config=config, n_warmup=6000,
+        transform=t, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    rhat = compute_rhat(samples)
+    rhat_max = float(np.max(rhat))
+
+    # Transform alone: observed R-hat ~1.07
+    assert rhat_max < 1.2, f"Transform-only R-hat={rhat_max:.4f} on funnel_63d (want < 1.2)"
+
+    # Check log-width variance for each funnel (observed ~8.2-8.9)
+    flat = samples.reshape(-1, 63)
+    for f_idx in range(4):
+        lw_idx = 7 + f_idx * 14
+        lw_var = float(np.var(flat[:, lw_idx]))
+        assert 4.5 < lw_var < 13.5, (
+            f"Funnel {f_idx} log-width var={lw_var:.2f}, want [4.5, 13.5]"
+        )
+
+
+@pytest.mark.slow
+def test_block_gibbs_funnel_63d():
+    """Block-Gibbs alone on funnel_63d (no transform)."""
+    from dezess.core.loop import run_variant
+    from dezess.benchmark.registry import VARIANTS
+    from dezess.targets_stream import funnel_63d
+    from dezess.benchmark.metrics import compute_rhat
+
+    target = funnel_63d()
+    config = VARIANTS["block_gibbs_scale_aware"]
+
+    key = jax.random.PRNGKey(42)
+    init = target.sample(key, 128)
+
+    result = run_variant(
+        target.log_prob, init, n_steps=8000,
+        config=config, n_warmup=6000, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    rhat = compute_rhat(samples)
+    rhat_max = float(np.max(rhat))
+
+    # Block-Gibbs alone: observed R-hat ~2.8. Should improve over baseline (3.7)
+    assert rhat_max < 3.5, f"Block-Gibbs R-hat={rhat_max:.4f} on funnel_63d (want < 3.5)"
+
+
+@pytest.mark.slow
+def test_combined_funnel_63d():
+    """Combined transform + block-Gibbs on funnel_63d — the main success criterion."""
+    from dezess.transforms import multi_funnel
+    from dezess.core.loop import run_variant
+    from dezess.benchmark.registry import VARIANTS
+    from dezess.targets_stream import funnel_63d
+    from dezess.benchmark.metrics import compute_rhat
+
+    target = funnel_63d()
+    t = multi_funnel(n_potential=7, funnel_blocks=[(7, 14), (21, 14), (35, 14), (49, 14)])
+    config = VARIANTS["block_gibbs_transform"]
+
+    key = jax.random.PRNGKey(42)
+    init = target.sample(key, 128)
+
+    result = run_variant(
+        target.log_prob, init, n_steps=8000,
+        config=config, n_warmup=6000,
+        transform=t, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    rhat = compute_rhat(samples)
+    rhat_max = float(np.max(rhat))
+
+    # SUCCESS CRITERION: R-hat < 1.2 (observed ~1.02)
+    assert rhat_max < 1.2, f"Combined R-hat={rhat_max:.4f} on funnel_63d (want < 1.2)"
+
+    # Check log-width variance for each funnel (observed ~8.2-8.4)
+    flat = samples.reshape(-1, 63)
+    for f_idx in range(4):
+        lw_idx = 7 + f_idx * 14
+        lw_var = float(np.var(flat[:, lw_idx]))
+        assert 4.5 < lw_var < 13.5, (
+            f"Funnel {f_idx} log-width var={lw_var:.2f}, want [4.5, 13.5]"
+        )
