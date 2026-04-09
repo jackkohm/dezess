@@ -76,6 +76,7 @@ def sample(
     n_walkers: Optional[int] = None,
     seed: int = 0,
     verbose: bool = True,
+    progress_fn: Optional[Callable] = None,
     **kwargs,
 ) -> SampleResult:
     """Draw posterior samples using dezess.
@@ -109,6 +110,11 @@ def sample(
         Random seed.
     verbose : bool
         Print progress during sampling.
+    **kwargs
+    progress_fn : callable or None
+        Callback function called every 50 production steps with a dict:
+        {"step": int, "n_steps": int, "ess_min": float, "rhat_max": float,
+         "speed": float (it/s)}. Useful for progress bars or notebook widgets.
     **kwargs
         Additional arguments passed to run_variant (e.g., z_max_size).
 
@@ -156,6 +162,7 @@ def sample(
         mu=1.0,
         tune=True,
         target_ess=target_ess,
+        progress_fn=progress_fn,
         verbose=verbose,
         **kwargs,
     )

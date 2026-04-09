@@ -102,6 +102,7 @@ def run_variant(
     z_max_size: int = 50000,
     z_initial: Optional[Array] = None,
     target_ess: Optional[float] = None,
+    progress_fn: Optional[Callable] = None,
     verbose: bool = True,
 ) -> dict:
     """Run a sampler variant composed from the given config.
@@ -683,6 +684,17 @@ def run_variant(
                   f"zero_move={zero_rate:.4f} "
                   f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
                   flush=True)
+
+        # Progress callback
+        if progress_fn is not None and step_idx % 50 < batch_sz:
+            elapsed = time.time() - t_prod
+            progress_fn({
+                "step": step_idx,
+                "n_steps": n_production,
+                "ess_min": stream_diag.ess_min(),
+                "rhat_max": stream_diag.rhat_max(),
+                "speed": step_idx / elapsed if elapsed > 0 else 0,
+            })
 
         # Early stopping: stop when target ESS is reached
         if target_ess is not None and step_idx >= 100:
