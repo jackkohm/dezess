@@ -183,6 +183,41 @@ def sample(
     )
 
 
+def init_walkers(
+    n_walkers: int,
+    n_dim: int,
+    center: Optional[np.ndarray] = None,
+    scale: float = 0.1,
+    seed: int = 0,
+) -> jnp.ndarray:
+    """Generate initial walker positions.
+
+    Parameters
+    ----------
+    n_walkers : int
+        Number of walkers.
+    n_dim : int
+        Number of dimensions.
+    center : array or None
+        Center point for initialization. If None, uses zeros.
+    scale : float
+        Standard deviation of the Gaussian ball around center.
+        Default 0.1 (tight ball, good for well-initialized runs).
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    array (n_walkers, n_dim)
+    """
+    key = jax.random.PRNGKey(seed)
+    noise = jax.random.normal(key, (n_walkers, n_dim), dtype=jnp.float64) * scale
+    if center is not None:
+        center = jnp.array(center, dtype=jnp.float64)
+        return noise + center
+    return noise
+
+
 def _resolve_variant(variant: str, n_dim: int) -> VariantConfig:
     """Resolve a variant name to a VariantConfig."""
     if variant == "auto":
