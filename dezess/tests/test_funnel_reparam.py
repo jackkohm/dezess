@@ -96,6 +96,25 @@ def test_multi_funnel_63d():
     np.testing.assert_allclose(t.log_det_jac(z), ldj_num, atol=1e-10)
 
 
+def test_sample_api_with_transform():
+    """dezess.sample() accepts and passes through transform."""
+    import dezess
+    from dezess.transforms import non_centered_funnel
+    from dezess.targets import neals_funnel
+
+    target = neals_funnel(10)
+    t = non_centered_funnel(width_idx=0, offset_indices=list(range(1, 10)))
+
+    key = jax.random.PRNGKey(0)
+    init = target.sample(key, 64)
+
+    result = dezess.sample(
+        target.log_prob, init, n_samples=1000, n_warmup=1000,
+        transform=t, verbose=False,
+    )
+    assert result.samples.shape[2] == 10
+
+
 def test_run_variant_with_transform():
     """run_variant with NonCenteredFunnel produces correct samples on 10D funnel."""
     from dezess.transforms import non_centered_funnel
@@ -129,3 +148,44 @@ def test_run_variant_with_transform():
     # log-width variance should be close to 9 (Neal's funnel prior)
     lw_var = np.var(samples[:, 0])
     assert 4.0 < lw_var < 15.0, f"log-width var={lw_var}, expected ~9"
+
+
+def test_geweke_transform_funnel():
+    """One-step Geweke invariance with NonCenteredFunnel transform.
+
+    Draw x ~ funnel, transform to z = inverse(x), apply one variant sweep
+    in z-space, transform back to x = forward(z). Output should still be
+    distributed as the funnel.
+    """
+    from dezess.transforms import non_centered_funnel
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+    from dezess.targets import neals_funnel
+    from scipy import stats
+
+    ndim = 10
+    target = neals_funnel(ndim)
+    t = non_centered_funnel(width_idx=0, offset_indices=list(range(1, ndim)))
+
+    config = VariantConfig(
+        name="geweke_ncp",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+    )
+
+    key = jax.random.PRNGKey(123)
+    n_walkers = 200
+    x_exact = target.sample(key, n_walkers)
+
+    result = run_variant(
+        target.log_prob, x_exact, n_steps=1, config=config,
+        n_warmup=500, transform=t, verbose=False,
+    )
+    x_out = np.array(result["samples"][0])
+
+    _, p_val = stats.kstest(x_out[:, 0] / 3.0, "norm")
+    assert p_val > 0.001, f"Geweke failed on log-width dim: KS p={p_val:.4f}"
