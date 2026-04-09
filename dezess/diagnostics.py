@@ -33,15 +33,30 @@ class StreamingDiagnostics:
         self._m2 = np.zeros((n_walkers, n_dim))  # sum of squared deviations
         self._prev = np.zeros((n_walkers, n_dim))
         self._lag1_sum = np.zeros((n_walkers, n_dim))  # sum of (x_t - mean)(x_{t-1} - mean)
+        # Divergence tracking
+        self._n_divergent = 0
+        self._max_abs_value = 0.0
 
-    def update(self, positions: np.ndarray):
+    def update(self, positions: np.ndarray, log_probs: np.ndarray = None):
         """Update with new positions (n_walkers, n_dim).
 
-        Call once per production step.
+        Call once per production step. Optionally pass log_probs
+        (n_walkers,) for divergence detection.
         """
         self.n_steps += 1
         n = self.n_steps
         x = np.asarray(positions)
+
+        # Track divergences: extreme values or NaN/Inf
+        max_abs = float(np.max(np.abs(x)))
+        if max_abs > self._max_abs_value:
+            self._max_abs_value = max_abs
+        if np.any(~np.isfinite(x)):
+            self._n_divergent += 1
+        if log_probs is not None:
+            lp = np.asarray(log_probs)
+            if np.any(lp < -1e29) or np.any(~np.isfinite(lp)):
+                self._n_divergent += 1
 
         if n == 1:
             self._mean[:] = x
@@ -118,6 +133,28 @@ class StreamingDiagnostics:
         rhat = self.rhat_per_dim()
         return float(np.max(rhat)) if len(rhat) > 0 else np.inf
 
+    def ensemble_diversity(self) -> float:
+        """Ratio of between-walker variance to within-walker variance.
+
+        Values near 0 indicate mode collapse (all walkers in the same place).
+        Values near 1 indicate good diversity (walkers spread across the target).
+        Values >> 1 may indicate walkers haven't converged to the same distribution.
+
+        This is essentially (B/W) averaged across dimensions, where B is the
+        between-chain variance and W is the within-chain variance.
+        """
+        if self.n_steps < 4:
+            return 0.0
+
+        n = self.n_steps
+        var = self._m2 / (n - 1)  # (n_walkers, n_dim)
+        W = np.mean(var, axis=0)  # within-chain variance per dim
+        B = np.var(self._mean, axis=0, ddof=1)  # between-chain variance per dim
+
+        W_safe = np.maximum(W, 1e-30)
+        ratio = B / W_safe  # per-dim diversity ratio
+        return float(np.mean(ratio))
+
     def summary(self) -> dict:
         """Return a summary dict of current diagnostics."""
         ess = self.ess_per_dim()
@@ -128,4 +165,6 @@ class StreamingDiagnostics:
             "ess_mean": float(np.mean(ess)),
             "rhat_max": float(np.max(rhat)),
             "rhat_mean": float(np.mean(rhat)),
+            "diversity": self.ensemble_diversity(),
+            "n_divergent": self._n_divergent,
         }

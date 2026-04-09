@@ -270,8 +270,14 @@ def run_variant(
                     **slice_kwargs,
                 )
 
-                # Un-temper the log_prob for storage (no Jacobian)
-                lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
+                # Un-temper the log_prob for storage.
+                # For standard ensemble (temp=1, no snooker Jacobian), lp_new
+                # from the slice sampler IS the raw log_prob — skip the
+                # redundant evaluation (saves 1 log_prob call per walker per step).
+                if config.direction == "snooker" or config.ensemble == "parallel_tempering":
+                    lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
+                else:
+                    lp_new_untempered = lp_new
 
                 # Update per-direction bracket widths if using that strategy
                 if config.width == "per_direction":
@@ -678,7 +684,7 @@ def run_variant(
                 all_log_probs[step_idx + i] = b_lps[i]
                 all_found[step_idx + i] = b_found[i]
                 all_bracket_ratios[step_idx + i] = b_br[i]
-                stream_diag.update(b_samples[i])
+                stream_diag.update(b_samples[i], b_lps[i])
             step_idx += batch_sz
         else:
             # Single step (fallback for parallel tempering or last batch)
@@ -700,7 +706,7 @@ def run_variant(
             all_log_probs[step_idx] = np.asarray(log_probs)
             all_found[step_idx] = np.asarray(found)
             all_bracket_ratios[step_idx] = np.asarray(br)
-            stream_diag.update(pos_np)
+            stream_diag.update(pos_np, np.asarray(log_probs))
             step_idx += 1
 
         if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
