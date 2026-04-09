@@ -1,5 +1,7 @@
 """dezess: DE-MCz Slice Sampler — fully GPU-parallel ensemble slice sampling."""
 
+__version__ = "0.2.0"
+
 from dezess.sampler import run_demcz_slice
 from dezess.core.loop import run_variant, DEFAULT_CONFIG
 from dezess.core.types import VariantConfig
