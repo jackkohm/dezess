@@ -301,6 +301,15 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
     ),
 
+    "scale_aware_early": VariantConfig(
+        name="scale_aware_early",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="early_stop",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+    ),
     "scale_aware_lean": VariantConfig(
         name="scale_aware_lean",
         direction="de_mcz",
