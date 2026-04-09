@@ -80,4 +80,8 @@ def sample_direction(
     norm = jnp.sqrt(jnp.sum(diff_w ** 2))
     d = diff_w / jnp.maximum(norm, 1e-30)
 
+    # Store raw (unwhitened) scale for scale_aware width compatibility
+    raw_norm = jnp.sqrt(jnp.sum(diff ** 2))
+    aux = aux._replace(direction_scale=raw_norm)
+
     return d, key, aux
