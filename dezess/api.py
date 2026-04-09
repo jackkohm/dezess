@@ -373,6 +373,47 @@ def init_walkers(
     return noise
 
 
+def find_map(
+    log_prob_fn: Callable[[Array], Array],
+    init: Array,
+    n_steps: int = 1000,
+    learning_rate: float = 0.01,
+) -> jnp.ndarray:
+    """Find the MAP (maximum a posteriori) estimate via gradient ascent.
+
+    Useful for finding a good starting point for sampling. Requires
+    the log-prob to be differentiable via JAX autodiff.
+
+    Parameters
+    ----------
+    log_prob_fn : callable
+        Log-probability function (must support jax.grad).
+    init : array (n_dim,)
+        Starting point for optimization.
+    n_steps : int
+        Number of gradient ascent steps.
+    learning_rate : float
+        Step size for gradient ascent.
+
+    Returns
+    -------
+    map_estimate : array (n_dim,)
+        Approximate MAP point.
+    """
+    x = jnp.array(init, dtype=jnp.float64)
+    grad_fn = jax.grad(log_prob_fn)
+
+    @jax.jit
+    def step(x):
+        g = grad_fn(x)
+        return x + learning_rate * g
+
+    for _ in range(n_steps):
+        x = step(x)
+
+    return x
+
+
 def _resolve_variant(variant: str, n_dim: int) -> VariantConfig:
     """Resolve a variant name to a VariantConfig."""
     if variant == "auto":
