@@ -464,10 +464,11 @@ def run_variant(
         if warmup_t_start > 1.0 and warmup_temp > 1.001:
             log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
 
-        # Append to Z-matrix
-        z_padded, z_count, z_log_probs = circular_zmatrix.append(
-            z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
-        )
+        # Append to Z-matrix (every 5 steps to reduce overhead)
+        if step % 5 == 0 or step == n_warmup - 1:
+            z_padded, z_count, z_log_probs = circular_zmatrix.append(
+                z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+            )
 
         # Track cap-hits for adaptive budget
         cap_hit_counts += int(jnp.sum(~found))
