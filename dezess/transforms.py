@@ -77,3 +77,69 @@ def non_centered_funnel(
         return jnp.float64(n_offsets) * z[width_idx] / 2.0
 
     return Transform(forward=forward, inverse=inverse, log_det_jac=log_det_jac)
+
+
+def block_transform(
+    transforms: Sequence[Transform],
+    index_lists: Sequence[Sequence[int]],
+    ndim: int,
+) -> Transform:
+    """Apply different transforms to different parameter blocks.
+
+    Each transform operates on its own block of dimensions. The blocks
+    must be non-overlapping and together cover all ndim dimensions.
+    """
+    idx_arrays = [jnp.array(idx, dtype=jnp.int32) for idx in index_lists]
+
+    def forward(z):
+        x = jnp.zeros(ndim, dtype=z.dtype)
+        for t, idx in zip(transforms, idx_arrays):
+            z_block = z[idx]
+            x_block = t.forward(z_block)
+            x = x.at[idx].set(x_block)
+        return x
+
+    def inverse(x):
+        z = jnp.zeros(ndim, dtype=x.dtype)
+        for t, idx in zip(transforms, idx_arrays):
+            x_block = x[idx]
+            z_block = t.inverse(x_block)
+            z = z.at[idx].set(z_block)
+        return z
+
+    def log_det_jac(z):
+        ldj = jnp.float64(0.0)
+        for t, idx in zip(transforms, idx_arrays):
+            z_block = z[idx]
+            ldj = ldj + t.log_det_jac(z_block)
+        return ldj
+
+    return Transform(forward=forward, inverse=inverse, log_det_jac=log_det_jac)
+
+
+def multi_funnel(
+    n_potential: int,
+    funnel_blocks: Sequence[tuple[int, int]],
+) -> Transform:
+    """Build a block transform for multiple funnel blocks + potential.
+
+    Parameters
+    ----------
+    n_potential : int
+        Number of potential parameters (identity-transformed).
+    funnel_blocks : list of (start_idx, block_size)
+        Each block: first dim is log-width, remaining are offsets.
+    """
+    transforms = [identity()]
+    index_lists = [list(range(n_potential))]
+
+    for start, size in funnel_blocks:
+        t = non_centered_funnel(
+            width_idx=0,
+            offset_indices=list(range(1, size)),
+        )
+        transforms.append(t)
+        index_lists.append(list(range(start, start + size)))
+
+    ndim = n_potential + sum(size for _, size in funnel_blocks)
+    return block_transform(transforms, index_lists, ndim)

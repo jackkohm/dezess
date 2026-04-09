@@ -53,3 +53,44 @@ def test_ncp_funnel_jacobian():
     _, ldj_numerical = jnp.linalg.slogdet(jac)
 
     np.testing.assert_allclose(ldj_analytical, ldj_numerical, atol=1e-10)
+
+
+def test_block_transform_roundtrip():
+    """block_transform applies different transforms to different dims."""
+    from dezess.transforms import identity, non_centered_funnel, block_transform
+
+    t = block_transform(
+        transforms=[identity(), non_centered_funnel(width_idx=0, offset_indices=[1, 2, 3, 4, 5, 6, 7])],
+        index_lists=[list(range(4)), list(range(4, 12))],
+        ndim=12,
+    )
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (12,), dtype=jnp.float64)
+    z = t.inverse(x)
+    x_rec = t.forward(z)
+    np.testing.assert_allclose(x_rec, x, atol=1e-12)
+
+    jac = jax.jacobian(t.forward)(z)
+    _, ldj_num = jnp.linalg.slogdet(jac)
+    np.testing.assert_allclose(t.log_det_jac(z), ldj_num, atol=1e-10)
+
+
+def test_multi_funnel_63d():
+    """multi_funnel helper builds correct 63D transform."""
+    from dezess.transforms import multi_funnel
+
+    t = multi_funnel(
+        n_potential=7,
+        funnel_blocks=[(7, 14), (21, 14), (35, 14), (49, 14)],
+    )
+    key = jax.random.PRNGKey(42)
+    x = jax.random.normal(key, (63,), dtype=jnp.float64)
+    z = t.inverse(x)
+    x_rec = t.forward(z)
+    np.testing.assert_allclose(x_rec, x, atol=1e-12)
+
+    np.testing.assert_allclose(z[:7], x[:7], atol=1e-14)
+
+    jac = jax.jacobian(t.forward)(z)
+    _, ldj_num = jnp.linalg.slogdet(jac)
+    np.testing.assert_allclose(t.log_det_jac(z), ldj_num, atol=1e-10)
