@@ -22,6 +22,8 @@ class VariantConfig(NamedTuple):
     slice_fn: str = "fixed"
     zmatrix: str = "circular"
     ensemble: str = "standard"
+    tune_method: str = "bracket"       # "bracket" or "esjd"
+    n_slices_per_step: int = 1         # >1 = multi-direction steps
     # Strategy-specific kwargs (e.g. momentum alpha, stochastic sigma)
     direction_kwargs: dict = {}
     width_kwargs: dict = {}
@@ -49,6 +51,7 @@ class WalkerAux(NamedTuple):
     prev_direction: Array   # (n_dim,) for momentum directions
     bracket_widths: Array   # (n_dim,) EMA of bracket widths per dim (per-direction width)
     direction_anchor: Array  # (n_dim,) snooker anchor point (z_r1) for Jacobian correction
+    direction_scale: Array   # scalar: natural scale |z_r1 - z_r2| for scale-aware width
 
 
 class SamplerState(NamedTuple):

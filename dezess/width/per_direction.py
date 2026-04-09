@@ -69,6 +69,7 @@ def update_bracket_widths(
         prev_direction=aux.prev_direction,
         bracket_widths=new_bw,
         direction_anchor=aux.direction_anchor,
+        direction_scale=aux.direction_scale,
     )
 
 
