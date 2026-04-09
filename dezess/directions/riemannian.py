@@ -87,4 +87,7 @@ def sample_direction(
     use_riem = jax.random.bernoulli(k_choice, riemannian_mix)
     d = jnp.where(use_riem, d_riem, d_demcz)
 
+    # Store DE-MCz pair distance for scale_aware width compatibility
+    aux = aux._replace(direction_scale=norm_de)
+
     return d, key, aux

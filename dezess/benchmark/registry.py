@@ -267,6 +267,45 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=2,
     ),
+    "local_pair_scale": VariantConfig(
+        name="local_pair_scale",
+        direction="local_pair",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        # local_mix capped at 0.3: higher values cause variance contraction
+        # (same state-dependent bias as snooker/gradient)
+        direction_kwargs={"n_candidates": 10, "local_mix": 0.3},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+
+    "momentum_scale": VariantConfig(
+        name="momentum_scale",
+        direction="momentum",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"alpha": 0.3},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+    "pca_scale": VariantConfig(
+        name="pca_scale",
+        direction="pca",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"pca_mix": 0.5},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+
+    # NOTE: coordinate directions tested but underperform DE-MCz on
+    # correlated targets because axis-aligned slices don't follow the
+    # posterior geometry. Available as direction="coordinate" but not
+    # recommended as default.
+
     # NOTE: gradient directions are experimental and NOT recommended.
     # The gradient d = normalize(grad(log_prob)(x)) is state-dependent and
     # radially biased, causing variance contraction (same issue as uncorrected

@@ -132,6 +132,21 @@ def test_zeus_gamma():
     _run_and_check_variance(config, "zeus_gamma")
 
 
+def test_local_pair():
+    """Local pair direction with scale-aware width."""
+    config = VariantConfig(
+        name="local_pair_scale",
+        direction="local_pair",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"n_candidates": 10, "local_mix": 0.3},
+        width_kwargs={"scale_factor": 1.0},
+    )
+    _run_and_check_variance(config, "local_pair_scale")
+
+
 def test_original_sampler():
     """The original run_demcz_slice path must also pass."""
     init = jax.random.normal(jax.random.PRNGKey(42), (N_WALKERS, NDIM)) * 0.1

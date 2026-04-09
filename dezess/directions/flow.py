@@ -265,4 +265,7 @@ def sample_direction(
     use_flow = jax.random.bernoulli(k_choice, flow_mix)
     d = jnp.where(use_flow, d_flow, d_demcz)
 
+    # Store DE-MCz pair distance for scale_aware width compatibility
+    aux = aux._replace(direction_scale=norm)
+
     return d, key, aux

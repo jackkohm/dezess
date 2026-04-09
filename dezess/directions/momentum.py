@@ -69,7 +69,7 @@ def sample_direction(
         prev_direction=d,
         bracket_widths=aux.bracket_widths,
         direction_anchor=aux.direction_anchor,
-        direction_scale=aux.direction_scale,
+        direction_scale=norm,  # from the DE-MCz pair for scale_aware width
     )
 
     return d, key, new_aux

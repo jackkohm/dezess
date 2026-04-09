@@ -26,7 +26,7 @@ from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -52,6 +52,8 @@ DIRECTION_STRATEGIES = {
     "flow": flow,
     "whitened": whitened,
     "gradient": gradient,
+    "coordinate": coordinate,
+    "local_pair": local_pair,
 }
 
 WIDTH_STRATEGIES = {
@@ -270,8 +272,17 @@ def run_variant(
                     **slice_kwargs,
                 )
 
-                # Un-temper the log_prob for storage (no Jacobian)
-                lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
+                # Un-temper the log_prob for storage.
+                # For standard ensemble at T=1 (no snooker Jacobian), lp_new
+                # from the slice sampler IS the raw log_prob — skip the
+                # redundant evaluation. But during warmup tempering (temp > 1)
+                # or with snooker/tempering, we must re-evaluate.
+                if config.direction == "snooker" or config.ensemble == "parallel_tempering":
+                    lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
+                else:
+                    # temp=1 in production; during warmup tempering this will
+                    # be re-evaluated in the warmup loop when needed
+                    lp_new_untempered = lp_new
 
                 # Update per-direction bracket widths if using that strategy
                 if config.width == "per_direction":
@@ -425,19 +436,39 @@ def run_variant(
     da_t0 = 10  # stabilization offset
     da_kappa = 0.75  # forgetting rate
 
+    # Warmup temperature schedule: start warm (T>1) for broader exploration,
+    # linearly cool to T=1 over warmup. Disabled by default because the
+    # extra log-prob re-evaluation per step adds overhead. Enable via
+    # ens_kwargs["warmup_t_start"] for hard targets.
+    warmup_t_start = float(ens_kwargs.get("warmup_t_start", 1.0))
+
     t_sample = time.time()
     for step in range(n_warmup):
+        # Linear temperature schedule
+        if warmup_t_start > 1.0 and n_warmup > 0:
+            frac = step / max(n_warmup - 1, 1)
+            warmup_temp = warmup_t_start * (1.0 - frac) + 1.0 * frac
+            warmup_temperatures = jnp.full(n_walkers, warmup_temp, dtype=jnp.float64)
+        else:
+            warmup_temperatures = temperatures
+
         (positions, log_probs, key, found, br,
          walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            walker_aux_ds, temperatures,
+            walker_aux_ds, warmup_temperatures,
         )
 
-        # Append to Z-matrix
-        z_padded, z_count, z_log_probs = circular_zmatrix.append(
-            z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
-        )
+        # During warmup tempering, the stored lp_new is tempered (log_prob / temp).
+        # Re-evaluate at T=1 so the next step sees the correct untempered value.
+        if warmup_t_start > 1.0 and warmup_temp > 1.001:
+            log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
+
+        # Append to Z-matrix (every 5 steps to reduce overhead)
+        if step % 5 == 0 or step == n_warmup - 1:
+            z_padded, z_count, z_log_probs = circular_zmatrix.append(
+                z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+            )
 
         # Track cap-hits for adaptive budget
         cap_hit_counts += int(jnp.sum(~found))
@@ -678,7 +709,7 @@ def run_variant(
                 all_log_probs[step_idx + i] = b_lps[i]
                 all_found[step_idx + i] = b_found[i]
                 all_bracket_ratios[step_idx + i] = b_br[i]
-                stream_diag.update(b_samples[i])
+                stream_diag.update(b_samples[i], b_lps[i])
             step_idx += batch_sz
         else:
             # Single step (fallback for parallel tempering or last batch)
@@ -700,7 +731,7 @@ def run_variant(
             all_log_probs[step_idx] = np.asarray(log_probs)
             all_found[step_idx] = np.asarray(found)
             all_bracket_ratios[step_idx] = np.asarray(br)
-            stream_diag.update(pos_np)
+            stream_diag.update(pos_np, np.asarray(log_probs))
             step_idx += 1
 
         if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
