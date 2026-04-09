@@ -170,6 +170,21 @@ def sample(
     # Extract streaming diagnostics
     streaming = result["diagnostics"].get("streaming", {})
 
+    # Convergence warnings
+    rhat = streaming.get("rhat_max", float("inf"))
+    ess = streaming.get("ess_min", 0.0)
+    n_div = streaming.get("n_divergent", 0)
+    if verbose:
+        if rhat > 1.1:
+            print(f"  WARNING: R-hat={rhat:.3f} > 1.1 — chains may not have converged. "
+                  f"Consider more warmup or production steps.", flush=True)
+        if ess < 100:
+            print(f"  WARNING: ESS={ess:.0f} < 100 — insufficient effective samples. "
+                  f"Consider more production steps or target_ess.", flush=True)
+        if n_div > 0:
+            print(f"  WARNING: {n_div} divergent steps detected — check model for "
+                  f"numerical issues.", flush=True)
+
     return SampleResult(
         samples=np.asarray(result["samples"]),
         log_prob=np.asarray(result["log_prob"]),
