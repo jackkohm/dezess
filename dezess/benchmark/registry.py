@@ -301,6 +301,37 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
     ),
 
+    "overrelaxed": VariantConfig(
+        name="overrelaxed",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="overrelaxed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.5},
+        slice_kwargs={"overrelax_prob": 0.8, "n_expand": 3, "n_shrink": 10},
+    ),
+
+    "scale_aware_early": VariantConfig(
+        name="scale_aware_early",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="early_stop",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+    ),
+    "scale_aware_lean": VariantConfig(
+        name="scale_aware_lean",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 1, "n_shrink": 3},
+    ),
+
     # NOTE: coordinate directions tested but underperform DE-MCz on
     # correlated targets because axis-aligned slices don't follow the
     # posterior geometry. Available as direction="coordinate" but not

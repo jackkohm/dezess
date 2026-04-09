@@ -26,14 +26,14 @@ from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
 # Slice modules
-from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection
+from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed
 # Z-matrix modules
-from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix
+from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
 from dezess.ensemble import standard as standard_ensemble, parallel_tempering
 
@@ -54,6 +54,7 @@ DIRECTION_STRATEGIES = {
     "gradient": gradient,
     "coordinate": coordinate,
     "local_pair": local_pair,
+    "kde": kde_direction,
 }
 
 WIDTH_STRATEGIES = {
@@ -68,11 +69,14 @@ SLICE_STRATEGIES = {
     "fixed": fixed_slice,
     "adaptive_budget": adaptive_budget,
     "delayed_rejection": delayed_rejection,
+    "early_stop": early_stop,
+    "overrelaxed": overrelaxed,
 }
 
 ZMATRIX_STRATEGIES = {
     "circular": circular_zmatrix,
     "hierarchical": hierarchical_zmatrix,
+    "live": live_zmatrix,
 }
 
 ENSEMBLE_STRATEGIES = {
@@ -153,9 +157,15 @@ def run_variant(
     zmat_kwargs = dict(config.zmatrix_kwargs)
     ens_kwargs = dict(config.ensemble_kwargs)
 
-    # Slice budget (may be tuned during warmup for adaptive_budget)
-    n_expand = slice_kwargs.pop("n_expand", 3)
-    n_shrink = slice_kwargs.pop("n_shrink", 12)
+    # Slice budget (may be tuned during warmup for adaptive_budget).
+    # scale_aware width produces well-calibrated brackets, so fewer
+    # expand/shrink iterations are needed (2/8 vs 3/12 default).
+    if config.width == "scale_aware" and "n_expand" not in slice_kwargs and "n_shrink" not in slice_kwargs:
+        n_expand = slice_kwargs.pop("n_expand", 2)
+        n_shrink = slice_kwargs.pop("n_shrink", 8)
+    else:
+        n_expand = slice_kwargs.pop("n_expand", 3)
+        n_shrink = slice_kwargs.pop("n_shrink", 12)
 
     # Initialize Z-matrix
     z_padded = jnp.zeros((z_max_size, n_dim), dtype=jnp.float64)
@@ -195,6 +205,9 @@ def run_variant(
     # Whitening matrix: pre-initialize with identity (updated after warmup)
     whitening_matrix = jnp.eye(n_dim, dtype=jnp.float64)
 
+    # KDE bandwidth: pre-initialize with ones (updated after warmup)
+    kde_bandwidth = jnp.ones(n_dim, dtype=jnp.float64)
+
     # --- Build JIT-compiled step function ---
     # All strategy-specific kwargs are captured as closure variables at trace time.
     # Python if-checks on config.direction/width/etc are resolved at trace time
@@ -207,7 +220,7 @@ def run_variant(
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
-                          flow_directions, whitening_matrix):
+                          flow_directions, whitening_matrix, kde_bandwidth):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
@@ -234,6 +247,12 @@ def run_variant(
                     d, w_key, w_aux = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         whitening_matrix=whitening_matrix,
+                        **dir_kwargs,
+                    )
+                elif config.direction == "kde":
+                    d, w_key, w_aux = dir_mod.sample_direction(
+                        x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
+                        kde_bandwidth=kde_bandwidth,
                         **dir_kwargs,
                     )
                 else:
@@ -379,7 +398,7 @@ def run_variant(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions, whitening_matrix,
+            pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
         )
 
     # --- Initial log-probs ---
@@ -612,6 +631,12 @@ def run_variant(
             print(f"  [{config.name}] Computing whitening matrix...", flush=True)
         whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
 
+    # Compute KDE bandwidth if using KDE directions
+    if config.direction == "kde" and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing KDE bandwidth...", flush=True)
+        kde_bandwidth = kde_direction.compute_kde_bandwidth(z_padded, z_count)
+
     # Adaptive budget: tune N_EXPAND/N_SHRINK and re-JIT
     needs_rejit = False
     if config.slice_fn == "adaptive_budget" and total_samples_warmup > 0:
@@ -623,7 +648,7 @@ def run_variant(
         needs_rejit = True
 
     # Re-JIT if budget changed or PCA/flow directions updated
-    if needs_rejit or config.direction in ("pca", "flow", "whitened"):
+    if needs_rejit or config.direction in ("pca", "flow", "whitened", "kde"):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
@@ -648,9 +673,12 @@ def run_variant(
     z_frozen = z_padded
     z_count_frozen = z_count
     z_lp_frozen = z_log_probs
+    live_z = config.zmatrix == "live"
+    live_update_rate = float(zmat_kwargs.get("update_rate", 0.01))
 
     if verbose:
-        print(f"  [{config.name}] Z-matrix frozen at {int(z_count_frozen)} entries",
+        mode = "live" if live_z else "frozen"
+        print(f"  [{config.name}] Z-matrix {mode} at {int(z_count_frozen)} entries",
               flush=True)
 
     # Streaming diagnostics for live ESS/R-hat monitoring
@@ -659,7 +687,8 @@ def run_variant(
     # Build a batched scan step for reduced Python overhead.
     # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
     SCAN_BATCH = 50
-    use_scan = (config.ensemble != "parallel_tempering")  # scan doesn't support swaps
+    # scan doesn't support swaps or live Z-matrix (Z changes each step)
+    use_scan = (config.ensemble != "parallel_tempering") and not live_z
 
     if use_scan:
         @jax.jit
@@ -668,7 +697,7 @@ def run_variant(
             (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
                 pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, k, pd, bw, da, ds, temperatures,
-                pca_components, pca_weights, flow_directions, whitening_matrix,
+                pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
             )
             return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
@@ -718,7 +747,7 @@ def run_variant(
                 positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                 walker_aux_ds, temperatures,
-                pca_components, pca_weights, flow_directions, whitening_matrix,
+                pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
             )
             if config.ensemble == "parallel_tempering":
                 key, k_swap = jax.random.split(key)
@@ -732,6 +761,16 @@ def run_variant(
             all_found[step_idx] = np.asarray(found)
             all_bracket_ratios[step_idx] = np.asarray(br)
             stream_diag.update(pos_np, np.asarray(log_probs))
+
+            # Live Z-matrix: update archive during production
+            if live_z:
+                key, k_live = jax.random.split(key)
+                z_frozen, z_count_frozen, z_lp_frozen = live_zmatrix.append(
+                    z_frozen, z_count_frozen, z_lp_frozen,
+                    positions, log_probs, z_max_size,
+                    update_rate=live_update_rate, key=k_live,
+                )
+
             step_idx += 1
 
         if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
