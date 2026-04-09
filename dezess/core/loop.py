@@ -24,6 +24,7 @@ from jax import lax
 from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
+from dezess.transforms import Transform, identity
 
 # Direction modules
 from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction
@@ -110,6 +111,7 @@ def run_variant(
     target_ess: Optional[float] = None,
     progress_fn: Optional[Callable] = None,
     verbose: bool = True,
+    transform: Optional[Transform] = None,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -128,6 +130,13 @@ def run_variant(
     if key is None:
         key = jax.random.PRNGKey(0)
     mu = jnp.float64(mu)
+
+    # --- Transform setup ---
+    if transform is not None:
+        init_positions = jax.vmap(transform.inverse)(init_positions)
+        _original_log_prob = log_prob_fn
+        def log_prob_fn(z, _fwd=transform.forward, _ldj=transform.log_det_jac, _lp=_original_log_prob):
+            return _lp(_fwd(z)) + _ldj(z)
 
     # Resolve strategies (validate names early for clear error messages)
     for name, registry, label in [
@@ -811,6 +820,14 @@ def run_variant(
                 break
 
     wall_time = time.time() - t_prod
+
+    # --- Map samples back to x-space ---
+    if transform is not None:
+        all_samples_x = np.zeros_like(all_samples[:n_production])
+        _fwd_vmap = jax.jit(jax.vmap(transform.forward))
+        for i in range(n_production):
+            all_samples_x[i] = np.asarray(_fwd_vmap(jnp.array(all_samples[i])))
+        all_samples[:n_production] = all_samples_x
 
     return {
         "samples": jnp.array(all_samples[:n_production]),

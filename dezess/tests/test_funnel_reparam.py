@@ -94,3 +94,38 @@ def test_multi_funnel_63d():
     jac = jax.jacobian(t.forward)(z)
     _, ldj_num = jnp.linalg.slogdet(jac)
     np.testing.assert_allclose(t.log_det_jac(z), ldj_num, atol=1e-10)
+
+
+def test_run_variant_with_transform():
+    """run_variant with NonCenteredFunnel produces correct samples on 10D funnel."""
+    from dezess.transforms import non_centered_funnel
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+    from dezess.targets import neals_funnel
+
+    target = neals_funnel(10)
+    t = non_centered_funnel(width_idx=0, offset_indices=list(range(1, 10)))
+
+    config = VariantConfig(
+        name="test_ncp",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+    )
+
+    key = jax.random.PRNGKey(0)
+    init = target.sample(key, 64)
+
+    result = run_variant(
+        target.log_prob, init, n_steps=3000,
+        config=config, n_warmup=2000,
+        transform=t, verbose=False,
+    )
+    samples = np.array(result["samples"]).reshape(-1, 10)
+
+    # log-width variance should be close to 9 (Neal's funnel prior)
+    lw_var = np.var(samples[:, 0])
+    assert 4.0 < lw_var < 15.0, f"log-width var={lw_var}, expected ~9"
