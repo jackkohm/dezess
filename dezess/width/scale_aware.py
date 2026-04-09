@@ -18,19 +18,25 @@ Array = jnp.ndarray
 
 
 def get_mu(mu: Array, d: Array, aux: Array, scale_factor: float = 1.0,
-           **kwargs) -> Array:
-    """Return scale_factor * aux.direction_scale, falling back to mu.
+           min_fraction: float = 0.1, **kwargs) -> Array:
+    """Return scale_factor * aux.direction_scale, with a floor of min_fraction * mu.
 
     Parameters
     ----------
     scale_factor : float
         Multiplicative factor applied to the direction scale.
         Default 1.0 (use the raw norm).
+    min_fraction : float
+        Minimum bracket width as a fraction of the tuned global mu.
+        Prevents tiny brackets during early warmup when the Z-matrix
+        is still clustered near initialization. Default 0.1.
     """
     ds = aux.direction_scale
     mu_eff = scale_factor * ds
-    # Fall back to global mu when direction_scale is near zero
-    return jnp.where(ds > 1e-30, mu_eff, mu)
+    mu_floor = min_fraction * mu
+    # Use direction_scale when available, floor it to avoid tiny brackets,
+    # fall back to global mu when direction_scale is zero
+    return jnp.where(ds > 1e-30, jnp.maximum(mu_eff, mu_floor), mu)
 
 
 def tune_mu(mu: Array, bracket_ratios: Array, aux: Array,

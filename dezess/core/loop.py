@@ -25,7 +25,7 @@ from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -50,6 +50,7 @@ DIRECTION_STRATEGIES = {
     "riemannian": riemannian,
     "flow": flow,
     "whitened": whitened,
+    "gradient": gradient,
 }
 
 WIDTH_STRATEGIES = {
@@ -127,6 +128,9 @@ def run_variant(
     ens_mod = ENSEMBLE_STRATEGIES[config.ensemble]
 
     dir_kwargs = dict(config.direction_kwargs)
+    # For gradient directions, compute grad_fn from log_prob
+    if config.direction == "gradient":
+        dir_kwargs["grad_fn"] = jax.grad(lambda x: safe_log_prob(log_prob_fn, x))
     width_kwargs = dict(config.width_kwargs)
     slice_kwargs = dict(config.slice_kwargs)
     zmat_kwargs = dict(config.zmatrix_kwargs)

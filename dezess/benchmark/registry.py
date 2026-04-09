@@ -248,6 +248,11 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=2,
     ),
+    # NOTE: gradient directions are experimental and NOT recommended.
+    # The gradient d = normalize(grad(log_prob)(x)) is state-dependent and
+    # radially biased, causing variance contraction (same issue as uncorrected
+    # snooker). See dezess/directions/gradient.py for details.
+
     "multi_direction_3": VariantConfig(
         name="multi_direction_3",
         direction="de_mcz",
