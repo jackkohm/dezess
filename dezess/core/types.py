@@ -22,6 +22,8 @@ class VariantConfig(NamedTuple):
     slice_fn: str = "fixed"
     zmatrix: str = "circular"
     ensemble: str = "standard"
+    tune_method: str = "bracket"       # "bracket" or "esjd"
+    n_slices_per_step: int = 1         # >1 = multi-direction steps
     # Strategy-specific kwargs (e.g. momentum alpha, stochastic sigma)
     direction_kwargs: dict = {}
     width_kwargs: dict = {}

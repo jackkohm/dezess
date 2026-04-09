@@ -25,9 +25,10 @@ from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
+from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
 # Slice modules
 from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection
 # Z-matrix modules
@@ -48,12 +49,15 @@ DIRECTION_STRATEGIES = {
     "momentum": momentum,
     "riemannian": riemannian,
     "flow": flow,
+    "whitened": whitened,
 }
 
 WIDTH_STRATEGIES = {
     "scalar": scalar_width,
     "stochastic": stochastic_width,
     "per_direction": per_direction,
+    "scale_aware": scale_aware_width,
+    "zeus_gamma": zeus_gamma_width,
 }
 
 SLICE_STRATEGIES = {
@@ -167,6 +171,9 @@ def run_variant(
     # During warmup, flow_directions is a dummy; the step_fn will use DE-MCz fallback
     flow_directions = jnp.zeros((500, n_dim), dtype=jnp.float64)
 
+    # Whitening matrix: pre-initialize with identity (updated after warmup)
+    whitening_matrix = jnp.eye(n_dim, dtype=jnp.float64)
+
     # --- Build JIT-compiled step function ---
     # All strategy-specific kwargs are captured as closure variables at trace time.
     # Python if-checks on config.direction/width/etc are resolved at trace time
@@ -179,7 +186,7 @@ def run_variant(
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
-                          flow_directions):
+                          flow_directions, whitening_matrix):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
@@ -200,6 +207,12 @@ def run_variant(
                     d, w_key, w_aux = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         flow_directions=flow_directions,
+                        **dir_kwargs,
+                    )
+                elif config.direction == "whitened":
+                    d, w_key, w_aux = dir_mod.sample_direction(
+                        x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
+                        whitening_matrix=whitening_matrix,
                         **dir_kwargs,
                     )
                 else:
@@ -248,6 +261,34 @@ def run_variant(
                         ema_alpha=width_kwargs.get("ema_alpha", 0.1),
                     )
 
+                # Multi-direction: additional sequential slices along fresh DE-MCz directions
+                if config.n_slices_per_step > 1:
+                    def _one_slice(i, carry):
+                        x_c, lp_c, w_key_c, found_c, L_c, R_c = carry
+                        w_key_c, k_dir = jax.random.split(w_key_c)
+                        k_idx1, k_idx2 = jax.random.split(k_dir)
+                        idx1 = jax.random.randint(k_idx1, (), 0, z_padded.shape[0]) % z_count
+                        idx2 = jax.random.randint(k_idx2, (), 0, z_padded.shape[0]) % z_count
+                        idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+                        diff = z_padded[idx1] - z_padded[idx2]
+                        norm = jnp.sqrt(jnp.sum(diff ** 2))
+                        d_new = diff / jnp.maximum(norm, 1e-30)
+                        w_key_c, k_w = jax.random.split(w_key_c)
+                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux, key=k_w, **width_kwargs)
+                        def lp_fn_multi(x):
+                            return safe_log_prob(log_prob_fn, x) / temp
+                        x_c, _, w_key_c, found_new, L_new, R_new = slice_mod.execute(
+                            lp_fn_multi, x_c, d_new, lp_c / temp, mu_eff_c, w_key_c,
+                            n_expand=n_exp, n_shrink=n_shr,
+                        )
+                        lp_c = safe_log_prob(log_prob_fn, x_c)
+                        return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new)
+
+                    init_carry = (x_new, lp_new_untempered, w_key, found, L, R)
+                    x_new, lp_new_untempered, w_key, found, L, R = jax.lax.fori_loop(
+                        0, config.n_slices_per_step - 1, _one_slice, init_carry
+                    )
+
                 bracket_ratio = (R - L) / jnp.maximum(mu_eff, 1e-30)
 
                 return (x_new, lp_new_untempered, w_key, found, bracket_ratio,
@@ -270,12 +311,12 @@ def run_variant(
     def _call_step(step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                    walker_aux_ds, temperatures):
-        """Helper to call step_fn with all required args including PCA/flow."""
+        """Helper to call step_fn with all required args including PCA/flow/whitening."""
         return step_fn(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions,
+            pca_components, pca_weights, flow_directions, whitening_matrix,
         )
 
     # --- Initial log-probs ---
@@ -317,6 +358,12 @@ def run_variant(
     cap_hit_counts = 0
     total_samples_warmup = 0
 
+    # ESJD tuning state
+    esjd_ema = 0.0
+    best_esjd = 0.0
+    best_mu = mu
+    prev_positions = positions
+
     t_sample = time.time()
     for step in range(n_warmup):
         (positions, log_probs, key, found, br,
@@ -335,13 +382,27 @@ def run_variant(
         cap_hit_counts += int(jnp.sum(~found))
         total_samples_warmup += n_walkers
 
+        # Track ESJD
+        esjd = float(jnp.mean(jnp.sum((positions - prev_positions)**2, axis=-1)))
+        esjd_ema = 0.3 * esjd + 0.7 * esjd_ema
+        prev_positions = positions
+
         # Tune mu
         if tune and (step + 1) % TUNE_INTERVAL == 0:
-            med_ratio = float(jnp.median(br))
-            ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
-            if ratio_ema > 0:
-                adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
-                mu = jnp.clip(mu * adjustment, MU_MIN, MU_MAX)
+            if config.tune_method == "esjd":
+                if esjd_ema > best_esjd:
+                    best_esjd = esjd_ema
+                    best_mu = mu
+                if (step + 1) % (TUNE_INTERVAL * 2) == 0:
+                    mu = jnp.clip(best_mu * 1.2, MU_MIN, MU_MAX)
+                else:
+                    mu = jnp.clip(best_mu * 0.83, MU_MIN, MU_MAX)
+            else:
+                med_ratio = float(jnp.median(br))
+                ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
+                if ratio_ema > 0:
+                    adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
+                    mu = jnp.clip(mu * adjustment, MU_MIN, MU_MAX)
 
         # Replica exchange swaps
         if config.ensemble == "parallel_tempering":
@@ -359,6 +420,10 @@ def run_variant(
             print(f"  [{config.name}] warmup {step+1:6d}/{n_warmup} "
                   f"({speed:.1f} it/s) best_lp={best:.1f} z_count={int(z_count)} "
                   f"mu={float(mu):.4f} bracket_ratio={med_br:.1f}", flush=True)
+
+    # Finalize ESJD tuning
+    if config.tune_method == "esjd" and tune and n_warmup > 0:
+        mu = best_mu
 
     # --- Post-warmup setup ---
 
@@ -394,6 +459,12 @@ def run_variant(
             print(f"  [{config.name}] Computing PCA components...", flush=True)
         pca_components, pca_weights = pca.compute_pca_components(z_padded, z_count)
 
+    # Compute whitening matrix if using whitened directions
+    if config.direction == "whitened" and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing whitening matrix...", flush=True)
+        whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
+
     # Adaptive budget: tune N_EXPAND/N_SHRINK and re-JIT
     needs_rejit = False
     if config.slice_fn == "adaptive_budget" and total_samples_warmup > 0:
@@ -405,7 +476,7 @@ def run_variant(
         needs_rejit = True
 
     # Re-JIT if budget changed or PCA/flow directions updated
-    if needs_rejit or config.direction in ("pca", "flow"):
+    if needs_rejit or config.direction in ("pca", "flow", "whitened"):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
@@ -442,7 +513,7 @@ def run_variant(
             positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions,
+            pca_components, pca_weights, flow_directions, whitening_matrix,
         )
 
         # Replica exchange swaps
