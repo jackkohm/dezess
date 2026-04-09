@@ -59,4 +59,6 @@ def sample_direction(
     norm = jnp.sqrt(jnp.sum(diff ** 2))
     d = diff / jnp.maximum(norm, 1e-30)
 
+    aux = aux._replace(direction_scale=norm)
+
     return d, key, aux
