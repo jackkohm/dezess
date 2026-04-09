@@ -33,7 +33,7 @@ from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_ga
 # Slice modules
 from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed
 # Z-matrix modules
-from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix
+from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
 from dezess.ensemble import standard as standard_ensemble, parallel_tempering
 
@@ -75,6 +75,7 @@ SLICE_STRATEGIES = {
 ZMATRIX_STRATEGIES = {
     "circular": circular_zmatrix,
     "hierarchical": hierarchical_zmatrix,
+    "live": live_zmatrix,
 }
 
 ENSEMBLE_STRATEGIES = {
@@ -656,9 +657,12 @@ def run_variant(
     z_frozen = z_padded
     z_count_frozen = z_count
     z_lp_frozen = z_log_probs
+    live_z = config.zmatrix == "live"
+    live_update_rate = float(zmat_kwargs.get("update_rate", 0.01))
 
     if verbose:
-        print(f"  [{config.name}] Z-matrix frozen at {int(z_count_frozen)} entries",
+        mode = "live" if live_z else "frozen"
+        print(f"  [{config.name}] Z-matrix {mode} at {int(z_count_frozen)} entries",
               flush=True)
 
     # Streaming diagnostics for live ESS/R-hat monitoring
@@ -667,7 +671,8 @@ def run_variant(
     # Build a batched scan step for reduced Python overhead.
     # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
     SCAN_BATCH = 50
-    use_scan = (config.ensemble != "parallel_tempering")  # scan doesn't support swaps
+    # scan doesn't support swaps or live Z-matrix (Z changes each step)
+    use_scan = (config.ensemble != "parallel_tempering") and not live_z
 
     if use_scan:
         @jax.jit
@@ -740,6 +745,16 @@ def run_variant(
             all_found[step_idx] = np.asarray(found)
             all_bracket_ratios[step_idx] = np.asarray(br)
             stream_diag.update(pos_np, np.asarray(log_probs))
+
+            # Live Z-matrix: update archive during production
+            if live_z:
+                key, k_live = jax.random.split(key)
+                z_frozen, z_count_frozen, z_lp_frozen = live_zmatrix.append(
+                    z_frozen, z_count_frozen, z_lp_frozen,
+                    positions, log_probs, z_max_size,
+                    update_rate=live_update_rate, key=k_live,
+                )
+
             step_idx += 1
 
         if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
