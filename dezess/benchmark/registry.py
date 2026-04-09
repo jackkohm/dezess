@@ -280,6 +280,27 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
     ),
 
+    "momentum_scale": VariantConfig(
+        name="momentum_scale",
+        direction="momentum",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"alpha": 0.3},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+    "pca_scale": VariantConfig(
+        name="pca_scale",
+        direction="pca",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"pca_mix": 0.5},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+
     # NOTE: coordinate directions tested but underperform DE-MCz on
     # correlated targets because axis-aligned slices don't follow the
     # posterior geometry. Available as direction="coordinate" but not
