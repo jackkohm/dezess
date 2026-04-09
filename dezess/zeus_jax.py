@@ -44,6 +44,7 @@ def run_zeus_jax(
     key: Optional[Array] = None,
     mu: float = 1.0,
     tune: bool = True,
+    move: str = "differential",
     max_expand: int = 10000,
     max_shrink: int = 100,
     verbose: bool = True,
@@ -62,6 +63,9 @@ def run_zeus_jax(
         Steps for warmup (mu tuning).
     mu : float
         Initial slice width scale.
+    move : str
+        Direction move type: "differential" (pair differences from
+        complementary ensemble) or "kde" (KDE-smoothed directions).
     max_expand : int
         Maximum stepping-out iterations (safety limit).
     max_shrink : int
@@ -82,24 +86,36 @@ def run_zeus_jax(
     positions = jnp.array(init_positions, dtype=jnp.float64)
     log_probs = jax.vmap(lambda x: _safe_log_prob(log_prob_fn, x))(positions)
 
+    from dezess.kde import compute_bandwidth, sample_kde_directions
+
     # JIT-compile the half-ensemble update
     @jax.jit
     def _update_half(active_pos, active_lp, inactive_pos, mu, key):
         """Update one half of the ensemble using the other half as reference."""
         n_active = active_pos.shape[0]
-        keys = jax.random.split(key, n_active + 1)
+        keys = jax.random.split(key, n_active + 2)
         key_next = keys[0]
-        walker_keys = keys[1:]
+        key_dirs = keys[1]
+        walker_keys = keys[2:]
 
-        def _update_one_walker(x, lp_x, ref_ensemble, mu, wkey):
-            wkey, k_pair1, k_pair2, k_u, k_bracket = jax.random.split(wkey, 5)
-            n_ref = ref_ensemble.shape[0]
-
-            # Direction: pair difference from reference ensemble (zeus-style)
-            idx1 = jax.random.randint(k_pair1, (), 0, n_ref)
-            idx2 = jax.random.randint(k_pair2, (), 0, n_ref)
+        # Precompute all directions for this half-sweep
+        if move == "kde":
+            bw = compute_bandwidth(inactive_pos, jnp.int32(inactive_pos.shape[0]))
+            all_directions = sample_kde_directions(
+                inactive_pos, jnp.int32(inactive_pos.shape[0]),
+                n_active, key_dirs, bandwidth=bw, mu=1.0,
+            ) * mu
+        else:
+            # Differential move: random pairs from inactive ensemble
+            n_ref = inactive_pos.shape[0]
+            dk1, dk2 = jax.random.split(key_dirs)
+            idx1 = jax.random.randint(dk1, (n_active,), 0, n_ref)
+            idx2 = jax.random.randint(dk2, (n_active,), 0, n_ref)
             idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % n_ref, idx2)
-            direction = 2.0 * mu * (ref_ensemble[idx1] - ref_ensemble[idx2])
+            all_directions = 2.0 * mu * (inactive_pos[idx1] - inactive_pos[idx2])
+
+        def _update_one_walker(x, lp_x, direction, wkey):
+            wkey, k_u, k_bracket = jax.random.split(wkey, 3)
 
             # Slice height
             log_u = lp_x - jax.random.exponential(k_u, dtype=jnp.float64)
@@ -160,8 +176,8 @@ def run_zeus_jax(
             return x_new, lp_new
 
         new_pos, new_lp = jax.vmap(
-            lambda x, lp, k: _update_one_walker(x, lp, inactive_pos, mu, k)
-        )(active_pos, active_lp, walker_keys)
+            lambda x, lp, d, k: _update_one_walker(x, lp, d, k)
+        )(active_pos, active_lp, all_directions, walker_keys)
 
         return new_pos, new_lp, key_next
 

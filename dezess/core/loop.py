@@ -26,7 +26,7 @@ from dezess.core.slice_sample import safe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -54,6 +54,7 @@ DIRECTION_STRATEGIES = {
     "gradient": gradient,
     "coordinate": coordinate,
     "local_pair": local_pair,
+    "kde": kde_direction,
 }
 
 WIDTH_STRATEGIES = {
@@ -204,6 +205,9 @@ def run_variant(
     # Whitening matrix: pre-initialize with identity (updated after warmup)
     whitening_matrix = jnp.eye(n_dim, dtype=jnp.float64)
 
+    # KDE bandwidth: pre-initialize with ones (updated after warmup)
+    kde_bandwidth = jnp.ones(n_dim, dtype=jnp.float64)
+
     # --- Build JIT-compiled step function ---
     # All strategy-specific kwargs are captured as closure variables at trace time.
     # Python if-checks on config.direction/width/etc are resolved at trace time
@@ -216,7 +220,7 @@ def run_variant(
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
-                          flow_directions, whitening_matrix):
+                          flow_directions, whitening_matrix, kde_bandwidth):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
@@ -243,6 +247,12 @@ def run_variant(
                     d, w_key, w_aux = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         whitening_matrix=whitening_matrix,
+                        **dir_kwargs,
+                    )
+                elif config.direction == "kde":
+                    d, w_key, w_aux = dir_mod.sample_direction(
+                        x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
+                        kde_bandwidth=kde_bandwidth,
                         **dir_kwargs,
                     )
                 else:
@@ -388,7 +398,7 @@ def run_variant(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions, whitening_matrix,
+            pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
         )
 
     # --- Initial log-probs ---
@@ -621,6 +631,12 @@ def run_variant(
             print(f"  [{config.name}] Computing whitening matrix...", flush=True)
         whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
 
+    # Compute KDE bandwidth if using KDE directions
+    if config.direction == "kde" and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing KDE bandwidth...", flush=True)
+        kde_bandwidth = kde_direction.compute_kde_bandwidth(z_padded, z_count)
+
     # Adaptive budget: tune N_EXPAND/N_SHRINK and re-JIT
     needs_rejit = False
     if config.slice_fn == "adaptive_budget" and total_samples_warmup > 0:
@@ -632,7 +648,7 @@ def run_variant(
         needs_rejit = True
 
     # Re-JIT if budget changed or PCA/flow directions updated
-    if needs_rejit or config.direction in ("pca", "flow", "whitened"):
+    if needs_rejit or config.direction in ("pca", "flow", "whitened", "kde"):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
@@ -681,7 +697,7 @@ def run_variant(
             (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
                 pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, k, pd, bw, da, ds, temperatures,
-                pca_components, pca_weights, flow_directions, whitening_matrix,
+                pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
             )
             return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
@@ -731,7 +747,7 @@ def run_variant(
                 positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                 walker_aux_ds, temperatures,
-                pca_components, pca_weights, flow_directions, whitening_matrix,
+                pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
             )
             if config.ensemble == "parallel_tempering":
                 key, k_swap = jax.random.split(key)
