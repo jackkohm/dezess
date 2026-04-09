@@ -368,6 +368,15 @@ def run_variant(
     best_mu = mu
     prev_positions = positions
 
+    # Dual averaging state (Nesterov 2009 / NUTS-style)
+    # Works in log-space: log_mu_bar converges to optimal log(mu)
+    log_mu = float(jnp.log(mu))
+    log_mu_bar = log_mu  # running average of log(mu)
+    H_bar = 0.0  # running average of adaptation statistic
+    da_gamma = 0.05  # shrinkage toward initial mu
+    da_t0 = 10  # stabilization offset
+    da_kappa = 0.75  # forgetting rate
+
     t_sample = time.time()
     for step in range(n_warmup):
         (positions, log_probs, key, found, br,
@@ -401,6 +410,18 @@ def run_variant(
                     mu = jnp.clip(best_mu * 1.2, MU_MIN, MU_MAX)
                 else:
                     mu = jnp.clip(best_mu * 0.83, MU_MIN, MU_MAX)
+            elif config.tune_method == "dual_avg":
+                # Dual averaging (Nesterov 2009 / NUTS-style) in log-space.
+                # Targets bracket_ratio ≈ TARGET_RATIO. The adaptation
+                # statistic H = 1 - ratio/target is zero at the target.
+                med_ratio = float(jnp.median(br))
+                m_adapt = (step + 1) // TUNE_INTERVAL
+                w = 1.0 / (m_adapt + da_t0)
+                H_bar = (1.0 - w) * H_bar + w * (1.0 - med_ratio / TARGET_RATIO)
+                log_mu = float(jnp.log(mu)) - (jnp.sqrt(m_adapt) / da_gamma) * H_bar
+                eta = m_adapt ** (-da_kappa)
+                log_mu_bar = eta * log_mu + (1.0 - eta) * log_mu_bar
+                mu = jnp.clip(jnp.exp(log_mu), MU_MIN, MU_MAX)
             else:
                 med_ratio = float(jnp.median(br))
                 ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
@@ -425,9 +446,13 @@ def run_variant(
                   f"({speed:.1f} it/s) best_lp={best:.1f} z_count={int(z_count)} "
                   f"mu={float(mu):.4f} bracket_ratio={med_br:.1f}", flush=True)
 
-    # Finalize ESJD tuning
+    # Finalize adaptive tuning
     if config.tune_method == "esjd" and tune and n_warmup > 0:
         mu = best_mu
+    elif config.tune_method == "dual_avg" and tune and n_warmup > 0:
+        mu = jnp.clip(jnp.exp(log_mu_bar), MU_MIN, MU_MAX)
+        if verbose:
+            print(f"  [{config.name}] Dual-avg final mu: {float(mu):.4f}", flush=True)
 
     # --- Post-warmup setup ---
 
