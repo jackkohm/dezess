@@ -106,8 +106,11 @@ class StreamingDiagnostics:
         chain_means = self._mean  # (n_walkers, n_dim)
         B = np.var(chain_means, axis=0, ddof=1) * n  # between-chain variance
 
-        var_hat = np.where(W > 0, (1 - 1.0/n) * W + B / n, 1.0)
-        rhat = np.sqrt(np.where(W > 0, var_hat / W, np.inf))
+        W_safe = np.maximum(W, 1e-30)
+        var_hat = (1 - 1.0/n) * W_safe + B / n
+        rhat = np.sqrt(var_hat / W_safe)
+        # Cap at reasonable values for early steps
+        rhat = np.minimum(rhat, 100.0)
         return rhat
 
     def rhat_max(self) -> float:
