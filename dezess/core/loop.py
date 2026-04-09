@@ -101,6 +101,7 @@ def run_variant(
     tune: bool = True,
     z_max_size: int = 50000,
     z_initial: Optional[Array] = None,
+    target_ess: Optional[float] = None,
     verbose: bool = True,
 ) -> dict:
     """Run a sampler variant composed from the given config.
@@ -644,22 +645,33 @@ def run_variant(
                   f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
                   flush=True)
 
+        # Early stopping: stop when target ESS is reached
+        if target_ess is not None and step_idx >= 100:
+            current_ess = stream_diag.ess_min()
+            if current_ess >= target_ess:
+                if verbose:
+                    print(f"  [{config.name}] Early stop: ESS={current_ess:.0f} >= "
+                          f"target={target_ess:.0f} at step {step_idx}/{n_production}",
+                          flush=True)
+                n_production = step_idx
+                break
+
     wall_time = time.time() - t_prod
 
     return {
-        "samples": jnp.array(all_samples),
-        "log_prob": jnp.array(all_log_probs),
+        "samples": jnp.array(all_samples[:n_production]),
+        "log_prob": jnp.array(all_log_probs[:n_production]),
         "mu": float(mu),
         "z_matrix": z_frozen[:int(z_count_frozen)],
         "config": config,
         "wall_time": wall_time,
         "n_production": n_production,
         "diagnostics": {
-            "found": all_found,
-            "bracket_ratios": all_bracket_ratios,
+            "found": all_found[:n_production],
+            "bracket_ratios": all_bracket_ratios[:n_production],
             "n_expand": n_expand,
             "n_shrink": n_shrink,
-            "cap_hit_rate": 1.0 - all_found.mean(),
+            "cap_hit_rate": 1.0 - all_found[:n_production].mean(),
             "streaming": stream_diag.summary(),
         },
     }
