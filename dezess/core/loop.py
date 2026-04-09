@@ -149,6 +149,7 @@ def run_variant(
         prev_direction=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
         bracket_widths=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
         direction_anchor=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
+        direction_scale=jnp.ones(n_walkers, dtype=jnp.float64),
     )
 
     # Initialize temperatures for parallel tempering
@@ -176,16 +177,17 @@ def run_variant(
         @jax.jit
         def parallel_step(positions, log_probs, z_padded, z_count, z_log_probs,
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
-                          walker_aux_d_anchor,
+                          walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
                           flow_directions):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
 
-            def update_one(x_i, lp_i, w_key, prev_d, bw, d_anchor, temp):
+            def update_one(x_i, lp_i, w_key, prev_d, bw, d_anchor, d_scale, temp):
                 w_aux = WalkerAux(prev_direction=prev_d, bracket_widths=bw,
-                                  direction_anchor=d_anchor)
+                                  direction_anchor=d_anchor,
+                                  direction_scale=d_scale)
 
                 # Direction — strategy-specific kwargs resolved at trace time
                 if config.direction == "pca":
@@ -250,29 +252,30 @@ def run_variant(
 
                 return (x_new, lp_new_untempered, w_key, found, bracket_ratio,
                         w_aux.prev_direction, w_aux.bracket_widths,
-                        w_aux.direction_anchor)
+                        w_aux.direction_anchor, w_aux.direction_scale)
 
             results = jax.vmap(update_one)(
                 positions, log_probs, walker_keys,
                 walker_aux_prev_dir, walker_aux_bw, walker_aux_d_anchor,
-                temperatures,
+                walker_aux_d_scale, temperatures,
             )
             (new_pos, new_lp, _, found, bracket_ratios,
-             new_prev_dirs, new_bws, new_d_anchors) = results
+             new_prev_dirs, new_bws, new_d_anchors, new_d_scales) = results
 
             return (new_pos, new_lp, key_next, found, bracket_ratios,
-                    new_prev_dirs, new_bws, new_d_anchors)
+                    new_prev_dirs, new_bws, new_d_anchors, new_d_scales)
 
         return parallel_step
 
     def _call_step(step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-                   temperatures):
+                   walker_aux_ds, temperatures):
         """Helper to call step_fn with all required args including PCA/flow."""
         return step_fn(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            temperatures, pca_components, pca_weights, flow_directions,
+            walker_aux_ds, temperatures,
+            pca_components, pca_weights, flow_directions,
         )
 
     # --- Initial log-probs ---
@@ -291,10 +294,10 @@ def run_variant(
         print(f"  [{config.name}] JIT compiling...", flush=True)
     t_jit = time.time()
     (positions, log_probs, key, _, _,
-     walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
+     walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
         step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
         mu, key, walker_aux.prev_direction, walker_aux.bracket_widths,
-        walker_aux.direction_anchor, temperatures,
+        walker_aux.direction_anchor, walker_aux.direction_scale, temperatures,
     )
     positions.block_until_ready()
     t_jit = time.time() - t_jit
@@ -317,10 +320,10 @@ def run_variant(
     t_sample = time.time()
     for step in range(n_warmup):
         (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
+         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            temperatures,
+            walker_aux_ds, temperatures,
         )
 
         # Append to Z-matrix
@@ -408,10 +411,10 @@ def run_variant(
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
         t_rejit = time.time()
         (positions, log_probs, key, _, _,
-         walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
+         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            temperatures,
+            walker_aux_ds, temperatures,
         )
         positions.block_until_ready()
         if verbose:
@@ -435,10 +438,11 @@ def run_variant(
     t_prod = time.time()
     for step in range(n_production):
         (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw, walker_aux_da) = step_fn(
+         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
             positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            temperatures, pca_components, pca_weights, flow_directions,
+            walker_aux_ds, temperatures,
+            pca_components, pca_weights, flow_directions,
         )
 
         # Replica exchange swaps
