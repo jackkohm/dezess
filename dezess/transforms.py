@@ -143,3 +143,100 @@ def multi_funnel(
 
     ndim = n_potential + sum(size for _, size in funnel_blocks)
     return block_transform(transforms, index_lists, ndim)
+
+
+def multi_width_funnel(
+    width_offset_pairs: Sequence[tuple[int, Sequence[int]]],
+    ndim: int,
+) -> Transform:
+    """Non-centered parameterization with multiple width params in one block.
+
+    Each (width_idx, offset_indices) pair defines a sub-funnel:
+    the width param controls the scale of its associated offsets.
+    All other dimensions are identity-transformed.
+
+    Parameters
+    ----------
+    width_offset_pairs : list of (width_idx, offset_indices)
+        Each pair: width_idx is the log-scale param, offset_indices
+        are the params whose scale it controls.
+    ndim : int
+        Total dimensions in this block.
+
+    Example (Sanders stream block, 14 params):
+        multi_width_funnel([
+            (8, [3, 4]),   # log_u -> gamma_1, gamma_2
+            (9, [6, 7]),   # log_w -> omega_1, omega_2
+            (10, [2, 5]),  # log_w0 -> gamma_0, omega_0
+        ], ndim=14)
+    """
+    # Precompute all width/offset arrays
+    pairs = [(w, jnp.array(offs, dtype=jnp.int32), len(offs))
+             for w, offs in width_offset_pairs]
+
+    def forward(z):
+        x = z
+        for w_idx, o_idx, _ in pairs:
+            scale = jnp.exp(z[w_idx] / 2.0)
+            x = x.at[o_idx].set(z[o_idx] * scale)
+        return x
+
+    def inverse(x):
+        z = x
+        for w_idx, o_idx, _ in pairs:
+            scale = jnp.exp(x[w_idx] / 2.0)
+            z = z.at[o_idx].set(x[o_idx] / scale)
+        return z
+
+    def log_det_jac(z):
+        ldj = jnp.float64(0.0)
+        for w_idx, _, n_offs in pairs:
+            ldj = ldj + jnp.float64(n_offs) * z[w_idx] / 2.0
+        return ldj
+
+    return Transform(forward=forward, inverse=inverse, log_det_jac=log_det_jac)
+
+
+def sanders_funnel(
+    n_potential: int = 7,
+    n_streams: int = 4,
+    n_nuisance: int = 14,
+) -> Transform:
+    """Non-centered transform matching the Sanders stream posterior.
+
+    Per-stream nuisance layout (14 params):
+        0: phi, 1: psi           — direction angles (unchanged)
+        2: gamma_0               — along-n angle offset (scaled by log_w0)
+        3: gamma_1, 4: gamma_2   — perp angle offsets (scaled by log_u)
+        5: omega_0               — along-n freq offset (scaled by log_w0)
+        6: omega_1, 7: omega_2   — perp freq offsets (scaled by log_w)
+        8: log_u                 — perp angle width
+        9: log_w                 — perp freq width
+        10: log_w0               — along-n width
+        11: log_Omega_s, 12: log_tmax, 13: logit_epsilon — unchanged
+
+    Three sub-funnels per stream:
+        log_u  (8)  -> gamma_1 (3), gamma_2 (4)
+        log_w  (9)  -> omega_1 (6), omega_2 (7)
+        log_w0 (10) -> gamma_0 (2), omega_0 (5)
+    """
+    ndim = n_potential + n_streams * n_nuisance
+
+    stream_transform = multi_width_funnel(
+        width_offset_pairs=[
+            (8, [3, 4]),   # log_u -> gamma_1, gamma_2
+            (9, [6, 7]),   # log_w -> omega_1, omega_2
+            (10, [2, 5]),  # log_w0 -> gamma_0, omega_0
+        ],
+        ndim=n_nuisance,
+    )
+
+    transforms = [identity()]  # potential block
+    index_lists = [list(range(n_potential))]
+
+    for s in range(n_streams):
+        start = n_potential + s * n_nuisance
+        transforms.append(stream_transform)
+        index_lists.append(list(range(start, start + n_nuisance)))
+
+    return block_transform(transforms, index_lists, ndim)

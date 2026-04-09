@@ -145,6 +145,123 @@ def funnel_63d(n_funnels: int = 4, n_per_funnel: int = 14, n_potential: int = 7)
     )
 
 
+def sanders_funnel_63d(n_potential: int = 7, n_streams: int = 4, n_nuisance: int = 14):
+    """63D target mimicking the Sanders stream posterior funnel structure.
+
+    Matches the real Sanders layout:
+        pot(7) + 4 x [phi, psi, gamma_0..2, omega_0..2, log_u, log_w, log_w0,
+                       log_Omega_s, log_tmax, logit_epsilon]
+
+    Three sub-funnels per stream:
+        log_u  (idx 8)  -> gamma_1 (3), gamma_2 (4)
+        log_w  (idx 9)  -> omega_1 (6), omega_2 (7)
+        log_w0 (idx 10) -> gamma_0 (2), omega_0 (5)
+
+    Non-funnel params (phi, psi, log_Omega_s, log_tmax, logit_epsilon) are
+    standard Gaussian. Potential params have mild correlation (condition ~20).
+    """
+    from dezess.targets import Target
+
+    ndim = n_potential + n_streams * n_nuisance
+    assert ndim == 63, f"Expected 63D, got {ndim}D"
+
+    # Correlated potential params
+    rng = np.random.RandomState(42)
+    evecs = np.linalg.qr(rng.randn(n_potential, n_potential))[0]
+    evals = np.linspace(1.0, 20.0, n_potential)
+    cov_pot = evecs @ np.diag(evals) @ evecs.T
+    prec_pot = np.linalg.inv(cov_pot)
+    L_pot = np.linalg.cholesky(cov_pot)
+    prec_pot_jax = jnp.array(prec_pot, dtype=jnp.float64)
+    L_pot_jax = jnp.array(L_pot, dtype=jnp.float64)
+
+    def log_prob(x):
+        # Potential: correlated Gaussian
+        pot = x[:n_potential]
+        lp = -0.5 * pot @ prec_pot_jax @ pot
+
+        for s in range(n_streams):
+            start = n_potential + s * n_nuisance
+            nuis = x[start:start + n_nuisance]
+
+            # Direction angles: phi(0), psi(1) ~ N(0, 1)
+            lp = lp - 0.5 * (nuis[0] ** 2 + nuis[1] ** 2)
+
+            # Sub-funnel 1: log_u(8) -> gamma_1(3), gamma_2(4)
+            log_u = nuis[8]
+            lp = lp - 0.5 * log_u ** 2 / 9.0  # log_u ~ N(0, 9)
+            var_u = jnp.exp(log_u)
+            lp = lp - 0.5 * (nuis[3] ** 2 + nuis[4] ** 2) / var_u
+            lp = lp - log_u  # log-det for 2 offsets
+
+            # Sub-funnel 2: log_w(9) -> omega_1(6), omega_2(7)
+            log_w = nuis[9]
+            lp = lp - 0.5 * log_w ** 2 / 9.0
+            var_w = jnp.exp(log_w)
+            lp = lp - 0.5 * (nuis[6] ** 2 + nuis[7] ** 2) / var_w
+            lp = lp - log_w
+
+            # Sub-funnel 3: log_w0(10) -> gamma_0(2), omega_0(5)
+            log_w0 = nuis[10]
+            lp = lp - 0.5 * log_w0 ** 2 / 9.0
+            var_w0 = jnp.exp(log_w0)
+            lp = lp - 0.5 * (nuis[2] ** 2 + nuis[5] ** 2) / var_w0
+            lp = lp - log_w0
+
+            # Remaining params: standard Gaussian
+            # log_Omega_s(11), log_tmax(12), logit_epsilon(13)
+            lp = lp - 0.5 * (nuis[11] ** 2 + nuis[12] ** 2 + nuis[13] ** 2)
+
+        return lp
+
+    def sample(key, n):
+        keys = jax.random.split(key, 2 + n_streams * 4)
+        # Potential
+        pot = jax.random.normal(keys[0], (n, n_potential), dtype=jnp.float64) @ L_pot_jax.T
+        parts = [pot]
+
+        for s in range(n_streams):
+            k_base = 2 + s * 4
+            k_dir, k_widths, k_offsets, k_rest = keys[k_base:k_base + 4]
+
+            block = jnp.zeros((n, n_nuisance), dtype=jnp.float64)
+            # Direction angles
+            dirs = jax.random.normal(k_dir, (n, 2), dtype=jnp.float64)
+            block = block.at[:, 0].set(dirs[:, 0])
+            block = block.at[:, 1].set(dirs[:, 1])
+
+            # Width params ~ N(0, 9)
+            widths = jax.random.normal(k_widths, (n, 3), dtype=jnp.float64) * 3.0
+            log_u, log_w, log_w0 = widths[:, 0], widths[:, 1], widths[:, 2]
+            block = block.at[:, 8].set(log_u)
+            block = block.at[:, 9].set(log_w)
+            block = block.at[:, 10].set(log_w0)
+
+            # Offsets scaled by widths
+            z_off = jax.random.normal(k_offsets, (n, 6), dtype=jnp.float64)
+            block = block.at[:, 3].set(z_off[:, 0] * jnp.exp(log_u / 2.0))   # gamma_1
+            block = block.at[:, 4].set(z_off[:, 1] * jnp.exp(log_u / 2.0))   # gamma_2
+            block = block.at[:, 6].set(z_off[:, 2] * jnp.exp(log_w / 2.0))   # omega_1
+            block = block.at[:, 7].set(z_off[:, 3] * jnp.exp(log_w / 2.0))   # omega_2
+            block = block.at[:, 2].set(z_off[:, 4] * jnp.exp(log_w0 / 2.0))  # gamma_0
+            block = block.at[:, 5].set(z_off[:, 5] * jnp.exp(log_w0 / 2.0))  # omega_0
+
+            # Remaining standard Gaussian
+            rest = jax.random.normal(k_rest, (n, 3), dtype=jnp.float64)
+            block = block.at[:, 11].set(rest[:, 0])
+            block = block.at[:, 12].set(rest[:, 1])
+            block = block.at[:, 13].set(rest[:, 2])
+
+            parts.append(block)
+
+        return jnp.concatenate(parts, axis=1)
+
+    return Target(
+        log_prob=log_prob, sample=sample, ndim=ndim,
+        name="sanders_funnel_63d", mean=jnp.zeros(ndim), cov=None,
+    )
+
+
 def banana_63d(n_potential: int = 7, n_nuisance: int = 56, b: float = 10.0):
     """63D target with banana-shaped potential params + Gaussian nuisance.
 
