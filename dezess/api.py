@@ -178,6 +178,11 @@ def sample(
     ess = streaming.get("ess_min", 0.0)
     n_div = streaming.get("n_divergent", 0)
     if verbose:
+        # Clean summary line
+        wall = result["wall_time"]
+        speed = result["n_production"] / wall if wall > 0 else 0
+        print(f"dezess: done — {result['n_production']} steps in {wall:.1f}s "
+              f"({speed:.0f} it/s), ESS={ess:.0f}, R-hat={rhat:.3f}", flush=True)
         if rhat > 1.1:
             print(f"  WARNING: R-hat={rhat:.3f} > 1.1 — chains may not have converged. "
                   f"Consider more warmup or production steps.", flush=True)
