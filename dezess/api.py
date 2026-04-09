@@ -134,7 +134,17 @@ def sample(
     >>> print(f"ESS: {result.ess_min:.0f}, R-hat: {result.rhat_max:.4f}")
     """
     init_positions = jnp.array(init_positions, dtype=jnp.float64)
+    if init_positions.ndim != 2:
+        raise ValueError(
+            f"init_positions must be 2D (n_walkers, n_dim), got shape {init_positions.shape}"
+        )
     n_walkers_init, n_dim = init_positions.shape
+    if n_walkers_init < 2:
+        raise ValueError(f"Need at least 2 walkers, got {n_walkers_init}")
+    if n_dim < 1:
+        raise ValueError(f"Need at least 1 dimension, got {n_dim}")
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be >= 1, got {n_samples}")
 
     # Auto-set warmup: scale with dimension for high-dim problems
     if n_warmup is None:
