@@ -23,6 +23,7 @@ from jax import lax
 
 from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
+from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
 from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient
@@ -535,6 +536,9 @@ def run_variant(
         print(f"  [{config.name}] Z-matrix frozen at {int(z_count_frozen)} entries",
               flush=True)
 
+    # Streaming diagnostics for live ESS/R-hat monitoring
+    stream_diag = StreamingDiagnostics(n_walkers, n_dim)
+
     t_prod = time.time()
     for step in range(n_production):
         (positions, log_probs, key, found, br,
@@ -553,10 +557,14 @@ def run_variant(
                 n_temps=ens_kwargs.get("n_temps", 4),
             )
 
-        all_samples[step] = np.asarray(positions)
+        pos_np = np.asarray(positions)
+        all_samples[step] = pos_np
         all_log_probs[step] = np.asarray(log_probs)
         all_found[step] = np.asarray(found)
         all_bracket_ratios[step] = np.asarray(br)
+
+        # Update streaming diagnostics
+        stream_diag.update(pos_np)
 
         if verbose and ((step + 1) % 200 == 0 or step == n_production - 1):
             elapsed = time.time() - t_prod
@@ -565,10 +573,13 @@ def run_variant(
             best = float(all_log_probs[:step+1].max())
             mean_lp = float(all_log_probs[max(0,step-199):step+1].mean())
             zero_rate = 1.0 - all_found[max(0,step-199):step+1].mean()
+            diag = stream_diag.summary()
             print(f"  [{config.name}] {step+1:6d}/{n_production} "
                   f"({speed:.1f} it/s, ETA {eta:.0f}s) "
                   f"best_lp={best:.1f} mean_lp={mean_lp:.1f} "
-                  f"zero_move={zero_rate:.4f}", flush=True)
+                  f"zero_move={zero_rate:.4f} "
+                  f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
+                  flush=True)
 
     wall_time = time.time() - t_prod
 
@@ -586,5 +597,6 @@ def run_variant(
             "n_expand": n_expand,
             "n_shrink": n_shrink,
             "cap_hit_rate": 1.0 - all_found.mean(),
+            "streaming": stream_diag.summary(),
         },
     }
