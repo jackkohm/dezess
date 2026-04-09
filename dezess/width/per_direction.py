@@ -68,6 +68,7 @@ def update_bracket_widths(
     return WalkerAux(
         prev_direction=aux.prev_direction,
         bracket_widths=new_bw,
+        direction_anchor=aux.direction_anchor,
     )
 
 

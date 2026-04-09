@@ -148,6 +148,7 @@ def run_variant(
     walker_aux = WalkerAux(
         prev_direction=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
         bracket_widths=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
+        direction_anchor=jnp.zeros((n_walkers, n_dim), dtype=jnp.float64),
     )
 
     # Initialize temperatures for parallel tempering
@@ -175,14 +176,16 @@ def run_variant(
         @jax.jit
         def parallel_step(positions, log_probs, z_padded, z_count, z_log_probs,
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
+                          walker_aux_d_anchor,
                           temperatures, pca_components, pca_weights,
                           flow_directions):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
 
-            def update_one(x_i, lp_i, w_key, prev_d, bw, temp):
-                w_aux = WalkerAux(prev_direction=prev_d, bracket_widths=bw)
+            def update_one(x_i, lp_i, w_key, prev_d, bw, d_anchor, temp):
+                w_aux = WalkerAux(prev_direction=prev_d, bracket_widths=bw,
+                                  direction_anchor=d_anchor)
 
                 # Direction — strategy-specific kwargs resolved at trace time
                 if config.direction == "pca":
@@ -207,18 +210,33 @@ def run_variant(
                 w_key, k_width = jax.random.split(w_key)
                 mu_eff = width_mod.get_mu(mu, d, w_aux, key=k_width, **width_kwargs)
 
-                # Tempered log_prob for parallel tempering
-                def lp_fn(x):
-                    return safe_log_prob(log_prob_fn, x) / temp
+                # Build slice log-density.
+                # For snooker: include Jacobian |x - anchor|^{d-1} so
+                # the 1D conditional in radial coords is correct.
+                if config.direction == "snooker":
+                    z_anchor = w_aux.direction_anchor
+                    ndim_j = x_i.shape[0]
+                    def lp_fn(x):
+                        base = safe_log_prob(log_prob_fn, x) / temp
+                        dist = jnp.sqrt(jnp.sum((x - z_anchor)**2))
+                        return base + (ndim_j - 1) * jnp.log(jnp.maximum(dist, 1e-30))
+
+                    dist_0 = jnp.sqrt(jnp.sum((x_i - z_anchor)**2))
+                    lp_x_slice = lp_i / temp + (ndim_j - 1) * jnp.log(jnp.maximum(dist_0, 1e-30))
+                else:
+                    def lp_fn(x):
+                        return safe_log_prob(log_prob_fn, x) / temp
+
+                    lp_x_slice = lp_i / temp
 
                 # Slice sample
                 x_new, lp_new, w_key, found, L, R = slice_mod.execute(
-                    lp_fn, x_i, d, lp_i / temp * temp, mu_eff, w_key,
+                    lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
                     n_expand=n_exp, n_shrink=n_shr,
                     **slice_kwargs,
                 )
 
-                # Un-temper the log_prob for storage
+                # Un-temper the log_prob for storage (no Jacobian)
                 lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
 
                 # Update per-direction bracket widths if using that strategy
@@ -230,25 +248,31 @@ def run_variant(
 
                 bracket_ratio = (R - L) / jnp.maximum(mu_eff, 1e-30)
 
-                return x_new, lp_new_untempered, w_key, found, bracket_ratio, w_aux.prev_direction, w_aux.bracket_widths
+                return (x_new, lp_new_untempered, w_key, found, bracket_ratio,
+                        w_aux.prev_direction, w_aux.bracket_widths,
+                        w_aux.direction_anchor)
 
             results = jax.vmap(update_one)(
                 positions, log_probs, walker_keys,
-                walker_aux_prev_dir, walker_aux_bw, temperatures,
+                walker_aux_prev_dir, walker_aux_bw, walker_aux_d_anchor,
+                temperatures,
             )
-            new_pos, new_lp, _, found, bracket_ratios, new_prev_dirs, new_bws = results
+            (new_pos, new_lp, _, found, bracket_ratios,
+             new_prev_dirs, new_bws, new_d_anchors) = results
 
-            return new_pos, new_lp, key_next, found, bracket_ratios, new_prev_dirs, new_bws
+            return (new_pos, new_lp, key_next, found, bracket_ratios,
+                    new_prev_dirs, new_bws, new_d_anchors)
 
         return parallel_step
 
     def _call_step(step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-                   mu, key, walker_aux_pd, walker_aux_bw, temperatures):
+                   mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                   temperatures):
         """Helper to call step_fn with all required args including PCA/flow."""
         return step_fn(
             positions, log_probs, z_padded, z_count, z_log_probs,
-            mu, key, walker_aux_pd, walker_aux_bw, temperatures,
-            pca_components, pca_weights, flow_directions,
+            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+            temperatures, pca_components, pca_weights, flow_directions,
         )
 
     # --- Initial log-probs ---
@@ -267,9 +291,10 @@ def run_variant(
         print(f"  [{config.name}] JIT compiling...", flush=True)
     t_jit = time.time()
     (positions, log_probs, key, _, _,
-     walker_aux_pd, walker_aux_bw) = _call_step(
+     walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
         step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-        mu, key, walker_aux.prev_direction, walker_aux.bracket_widths, temperatures,
+        mu, key, walker_aux.prev_direction, walker_aux.bracket_widths,
+        walker_aux.direction_anchor, temperatures,
     )
     positions.block_until_ready()
     t_jit = time.time() - t_jit
@@ -292,9 +317,10 @@ def run_variant(
     t_sample = time.time()
     for step in range(n_warmup):
         (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw) = _call_step(
+         walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-            mu, key, walker_aux_pd, walker_aux_bw, temperatures,
+            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+            temperatures,
         )
 
         # Append to Z-matrix
@@ -382,9 +408,10 @@ def run_variant(
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
         t_rejit = time.time()
         (positions, log_probs, key, _, _,
-         walker_aux_pd, walker_aux_bw) = _call_step(
+         walker_aux_pd, walker_aux_bw, walker_aux_da) = _call_step(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
-            mu, key, walker_aux_pd, walker_aux_bw, temperatures,
+            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+            temperatures,
         )
         positions.block_until_ready()
         if verbose:
@@ -408,10 +435,10 @@ def run_variant(
     t_prod = time.time()
     for step in range(n_production):
         (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw) = step_fn(
+         walker_aux_pd, walker_aux_bw, walker_aux_da) = step_fn(
             positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
-            mu, key, walker_aux_pd, walker_aux_bw, temperatures,
-            pca_components, pca_weights, flow_directions,
+            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+            temperatures, pca_components, pca_weights, flow_directions,
         )
 
         # Replica exchange swaps
