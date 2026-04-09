@@ -13,10 +13,10 @@ def get_mu(mu: Array, d: Array, aux: Array, **kwargs) -> Array:
 
 
 def tune_mu(mu: Array, bracket_ratios: Array, aux: Array,
-            target_ratio: float = 4.0, **kwargs) -> tuple[Array, Array]:
+            target_ratio: float = 4.0, **kwargs) -> tuple:
     """Tune scalar mu based on median bracket ratio.
 
-    Returns (new_mu, updated_aux).
+    Returns (new_mu, updated_aux, ratio_ema).
     """
     med_ratio = jnp.median(bracket_ratios)
     ratio_ema = kwargs.get("ratio_ema", target_ratio)

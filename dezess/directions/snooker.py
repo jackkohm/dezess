@@ -12,8 +12,6 @@ aux.direction_anchor so the caller can compute it.
 
 from __future__ import annotations
 
-from typing import Callable
-
 import jax
 import jax.numpy as jnp
 

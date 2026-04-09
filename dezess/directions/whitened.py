@@ -12,6 +12,8 @@ warmup, falls back to standard DE-MCz.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 
@@ -50,7 +52,7 @@ def sample_direction(
     z_log_probs: Array,
     key: Array,
     aux: Array,
-    whitening_matrix: Array = None,
+    whitening_matrix: Optional[Array] = None,
     **kwargs,
 ) -> tuple[Array, Array, Array]:
     """Sample a whitened DE-MCz direction from two random Z-matrix entries.

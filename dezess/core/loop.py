@@ -121,7 +121,19 @@ def run_variant(
         key = jax.random.PRNGKey(0)
     mu = jnp.float64(mu)
 
-    # Resolve strategies
+    # Resolve strategies (validate names early for clear error messages)
+    for name, registry, label in [
+        (config.direction, DIRECTION_STRATEGIES, "direction"),
+        (config.width, WIDTH_STRATEGIES, "width"),
+        (config.slice_fn, SLICE_STRATEGIES, "slice_fn"),
+        (config.zmatrix, ZMATRIX_STRATEGIES, "zmatrix"),
+        (config.ensemble, ENSEMBLE_STRATEGIES, "ensemble"),
+    ]:
+        if name not in registry:
+            raise ValueError(
+                f"Unknown {label} strategy '{name}'. "
+                f"Available: {sorted(registry.keys())}"
+            )
     dir_mod = DIRECTION_STRATEGIES[config.direction]
     width_mod = WIDTH_STRATEGIES[config.width]
     slice_mod = SLICE_STRATEGIES[config.slice_fn]

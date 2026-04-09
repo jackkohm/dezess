@@ -74,7 +74,7 @@ def update_bracket_widths(
 
 
 def tune_mu(mu: Array, bracket_ratios: Array, aux: Array,
-            target_ratio: float = 4.0, **kwargs) -> tuple[Array, Array]:
+            target_ratio: float = 4.0, **kwargs) -> tuple:
     """For per-direction width, scalar mu is a fallback. Tune it normally."""
     med_ratio = jnp.median(bracket_ratios)
     ratio_ema = kwargs.get("ratio_ema", target_ratio)
