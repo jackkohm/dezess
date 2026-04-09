@@ -301,6 +301,17 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
     ),
 
+    "overrelaxed": VariantConfig(
+        name="overrelaxed",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="overrelaxed",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.5},
+        slice_kwargs={"overrelax_prob": 0.8, "n_expand": 3, "n_shrink": 10},
+    ),
+
     "scale_aware_early": VariantConfig(
         name="scale_aware_early",
         direction="de_mcz",
