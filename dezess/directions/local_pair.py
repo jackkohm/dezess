@@ -5,9 +5,11 @@ neighborhood of the current walker (using approximate nearest-neighbor
 via random projection). The direction z_r1 - z_r2 is then more
 locally relevant, capturing the posterior geometry near x_i.
 
-This helps in high dimensions where random pairs may be far from
-the current position and produce directions that don't match the
-local covariance structure.
+WARNING: local_mix > 0.3 causes variance contraction on Gaussian
+targets (same state-dependent bias as snooker/gradient). The locality
+bias is a form of state-dependent direction selection that needs
+a Jacobian correction which is not implemented here. Keep local_mix
+at 0.3 or below.
 """
 
 from __future__ import annotations

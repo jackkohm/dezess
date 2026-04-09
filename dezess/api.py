@@ -232,19 +232,7 @@ def _resolve_variant(variant: str, n_dim: int) -> VariantConfig:
             width_kwargs={"scale_factor": 1.0},
         )
     elif variant == "fast":
-        # Best ESS per evaluation (for expensive log-probs).
-        # Use local_pair for high-dim (>15D) where locality helps.
-        if n_dim > 15:
-            return VariantConfig(
-                name="local_pair_scale",
-                direction="local_pair",
-                width="scale_aware",
-                slice_fn="fixed",
-                zmatrix="circular",
-                ensemble="standard",
-                direction_kwargs={"n_candidates": 10, "local_mix": 0.5},
-                width_kwargs={"scale_factor": 1.0},
-            )
+        # Best ESS per evaluation (for expensive log-probs)
         return VariantConfig(
             name="scale_aware",
             direction="de_mcz",

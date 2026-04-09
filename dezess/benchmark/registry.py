@@ -274,7 +274,9 @@ VARIANTS = {
         slice_fn="fixed",
         zmatrix="circular",
         ensemble="standard",
-        direction_kwargs={"n_candidates": 10, "local_mix": 0.5},
+        # local_mix capped at 0.3: higher values cause variance contraction
+        # (same state-dependent bias as snooker/gradient)
+        direction_kwargs={"n_candidates": 10, "local_mix": 0.3},
         width_kwargs={"scale_factor": 1.0},
     ),
 
