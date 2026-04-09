@@ -239,6 +239,25 @@ VARIANTS = {
         ensemble="standard",
         tune_method="esjd",
     ),
+    "dual_avg": VariantConfig(
+        name="dual_avg",
+        direction="de_mcz",
+        width="scalar",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        tune_method="dual_avg",
+    ),
+    "dual_avg_scale": VariantConfig(
+        name="dual_avg_scale",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        tune_method="dual_avg",
+        width_kwargs={"scale_factor": 1.0},
+    ),
     "multi_direction_2": VariantConfig(
         name="multi_direction_2",
         direction="de_mcz",
@@ -248,6 +267,11 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=2,
     ),
+    # NOTE: gradient directions are experimental and NOT recommended.
+    # The gradient d = normalize(grad(log_prob)(x)) is state-dependent and
+    # radially biased, causing variance contraction (same issue as uncorrected
+    # snooker). See dezess/directions/gradient.py for details.
+
     "multi_direction_3": VariantConfig(
         name="multi_direction_3",
         direction="de_mcz",
@@ -270,7 +294,8 @@ TARGET_SETS = {
         "funnel_10", "rosenbrock_4", "ill_conditioned_10", "ring_2",
     ],
     "hard": ["funnel_10", "rosenbrock_4", "ill_conditioned_10", "mixture_5"],
-    "high_dim": ["isotropic_30"],
+    "high_dim": ["isotropic_30", "isotropic_60", "correlated_30", "correlated_60",
+                  "ill_conditioned_30", "ill_conditioned_60"],
 }
 
 

@@ -46,7 +46,7 @@ def get_mu(mu: Array, d: Array, aux: Array, key: Array = None,
 
 
 def tune_mu(mu: Array, bracket_ratios: Array, aux: Array,
-            target_ratio: float = 4.0, **kwargs) -> tuple[Array, Array]:
+            target_ratio: float = 4.0, **kwargs) -> tuple:
     """Tune the fallback mu (same as scalar). Zeus gamma width is applied at get_mu time."""
     med_ratio = jnp.median(bracket_ratios)
     ratio_ema = kwargs.get("ratio_ema", target_ratio)

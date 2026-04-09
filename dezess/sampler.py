@@ -17,13 +17,23 @@ No while_loops anywhere -- stepping-out uses fori_loop(0, N_EXPAND, ...),
 shrinking uses fori_loop(0, N_SHRINK, ...). Both gate on a `done` flag
 so extra iterations are no-ops after convergence.
 
-Theory: The Z-matrix is frozen after warmup. Conditioned on a fixed Z,
-each walker update is a valid slice-sampling transition using a direction
-independent of the walker being updated, so the fully parallel sweep
-leaves the product target invariant. The fixed-iteration slice is exact
-when the slice is found within budget; otherwise the chain performs a
-self-transition (pathwise symmetry of the shrinkage procedure ensures
-the truncated kernel preserves detailed balance).
+Theory (DE-MCz path, this file):
+  The Z-matrix is frozen after warmup. Conditioned on a fixed Z,
+  each walker update uses d = normalize(z_r1 - z_r2), a direction
+  independent of the walker being updated, so the fully parallel
+  sweep leaves the product target invariant.
+
+Theory (snooker path, dezess/directions/snooker.py):
+  The snooker direction d = normalize(x_i - z_r1) IS state-dependent.
+  Correctness follows from a different argument: the line through z_r1
+  and x_i is parameterised radially from z_r1, so the 1D conditional
+  includes a Jacobian factor |x - z_r1|^{d-1}. This correction is
+  applied to the slice log-density in core/loop.py. Without it the
+  sampler contracts severely (variance ~0.07 instead of ~1.0).
+
+Fixed-iteration slice: exact when the slice is found within budget;
+otherwise the chain performs a self-transition (the shrinkage procedure
+is symmetric so the truncated kernel preserves detailed balance).
 
 This gives: slice sampling quality + DE-MCz parallelism + fast compilation.
 

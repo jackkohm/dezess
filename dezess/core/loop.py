@@ -23,9 +23,10 @@ from jax import lax
 
 from dezess.core.types import VariantConfig, WalkerAux, SamplerState
 from dezess.core.slice_sample import safe_log_prob
+from dezess.diagnostics import StreamingDiagnostics
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -50,6 +51,7 @@ DIRECTION_STRATEGIES = {
     "riemannian": riemannian,
     "flow": flow,
     "whitened": whitened,
+    "gradient": gradient,
 }
 
 WIDTH_STRATEGIES = {
@@ -99,6 +101,8 @@ def run_variant(
     tune: bool = True,
     z_max_size: int = 50000,
     z_initial: Optional[Array] = None,
+    target_ess: Optional[float] = None,
+    progress_fn: Optional[Callable] = None,
     verbose: bool = True,
 ) -> dict:
     """Run a sampler variant composed from the given config.
@@ -119,7 +123,19 @@ def run_variant(
         key = jax.random.PRNGKey(0)
     mu = jnp.float64(mu)
 
-    # Resolve strategies
+    # Resolve strategies (validate names early for clear error messages)
+    for name, registry, label in [
+        (config.direction, DIRECTION_STRATEGIES, "direction"),
+        (config.width, WIDTH_STRATEGIES, "width"),
+        (config.slice_fn, SLICE_STRATEGIES, "slice_fn"),
+        (config.zmatrix, ZMATRIX_STRATEGIES, "zmatrix"),
+        (config.ensemble, ENSEMBLE_STRATEGIES, "ensemble"),
+    ]:
+        if name not in registry:
+            raise ValueError(
+                f"Unknown {label} strategy '{name}'. "
+                f"Available: {sorted(registry.keys())}"
+            )
     dir_mod = DIRECTION_STRATEGIES[config.direction]
     width_mod = WIDTH_STRATEGIES[config.width]
     slice_mod = SLICE_STRATEGIES[config.slice_fn]
@@ -127,6 +143,9 @@ def run_variant(
     ens_mod = ENSEMBLE_STRATEGIES[config.ensemble]
 
     dir_kwargs = dict(config.direction_kwargs)
+    # For gradient directions, compute grad_fn from log_prob
+    if config.direction == "gradient":
+        dir_kwargs["grad_fn"] = jax.grad(lambda x: safe_log_prob(log_prob_fn, x))
     width_kwargs = dict(config.width_kwargs)
     slice_kwargs = dict(config.slice_kwargs)
     zmat_kwargs = dict(config.zmatrix_kwargs)
@@ -261,20 +280,53 @@ def run_variant(
                         ema_alpha=width_kwargs.get("ema_alpha", 0.1),
                     )
 
-                # Multi-direction: additional sequential slices along fresh DE-MCz directions
+                # Multi-direction: additional sequential slices along
+                # orthogonalized DE-MCz directions (Gibbs-like coordinate cycling).
+                # Each direction is made orthogonal to all previous ones via
+                # Gram-Schmidt, ensuring each slice explores a different subspace.
                 if config.n_slices_per_step > 1:
+                    # prev_dirs stores directions used so far for orthogonalization
+                    # Shape: (max_slices, n_dim) — padded with zeros
+                    n_max_slices = config.n_slices_per_step
+                    ndim_local = x_i.shape[0]
+                    prev_dirs = jnp.zeros((n_max_slices, ndim_local), dtype=jnp.float64)
+                    prev_dirs = prev_dirs.at[0].set(d)  # first direction already used
+
                     def _one_slice(i, carry):
-                        x_c, lp_c, w_key_c, found_c, L_c, R_c = carry
+                        x_c, lp_c, w_key_c, found_c, L_c, R_c, pdirs = carry
                         w_key_c, k_dir = jax.random.split(w_key_c)
                         k_idx1, k_idx2 = jax.random.split(k_dir)
                         idx1 = jax.random.randint(k_idx1, (), 0, z_padded.shape[0]) % z_count
                         idx2 = jax.random.randint(k_idx2, (), 0, z_padded.shape[0]) % z_count
                         idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
                         diff = z_padded[idx1] - z_padded[idx2]
-                        norm = jnp.sqrt(jnp.sum(diff ** 2))
-                        d_new = diff / jnp.maximum(norm, 1e-30)
+
+                        # Gram-Schmidt: remove components along previous directions.
+                        # Use fixed-size loop over all slots, masking by index.
+                        def _gs_step(d_raw, j):
+                            active = j <= i  # only remove for dirs already set
+                            proj = jnp.dot(d_raw, pdirs[j]) * pdirs[j]
+                            d_raw = jnp.where(active, d_raw - proj, d_raw)
+                            return d_raw, None
+                        d_ortho, _ = jax.lax.scan(
+                            _gs_step, diff, jnp.arange(n_max_slices),
+                        )
+
+                        norm_ortho = jnp.sqrt(jnp.sum(d_ortho ** 2))
+                        norm_raw = jnp.sqrt(jnp.sum(diff ** 2))
+                        # Fall back to raw direction if orthogonal component is tiny
+                        use_ortho = norm_ortho > 1e-10 * norm_raw
+                        d_final = jnp.where(use_ortho, d_ortho, diff)
+                        d_norm = jnp.where(use_ortho, norm_ortho, norm_raw)
+                        d_new = d_final / jnp.maximum(d_norm, 1e-30)
+
+                        # Store for next iteration's orthogonalization
+                        pdirs = pdirs.at[i + 1].set(d_new)
+
+                        # Scale-aware width using raw norm
+                        w_aux_c = w_aux._replace(direction_scale=norm_raw)
                         w_key_c, k_w = jax.random.split(w_key_c)
-                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux, key=k_w, **width_kwargs)
+                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w, **width_kwargs)
                         def lp_fn_multi(x):
                             return safe_log_prob(log_prob_fn, x) / temp
                         x_c, _, w_key_c, found_new, L_new, R_new = slice_mod.execute(
@@ -282,10 +334,10 @@ def run_variant(
                             n_expand=n_exp, n_shrink=n_shr,
                         )
                         lp_c = safe_log_prob(log_prob_fn, x_c)
-                        return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new)
+                        return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new, pdirs)
 
-                    init_carry = (x_new, lp_new_untempered, w_key, found, L, R)
-                    x_new, lp_new_untempered, w_key, found, L, R = jax.lax.fori_loop(
+                    init_carry = (x_new, lp_new_untempered, w_key, found, L, R, prev_dirs)
+                    x_new, lp_new_untempered, w_key, found, L, R, _ = jax.lax.fori_loop(
                         0, config.n_slices_per_step - 1, _one_slice, init_carry
                     )
 
@@ -364,6 +416,15 @@ def run_variant(
     best_mu = mu
     prev_positions = positions
 
+    # Dual averaging state (Nesterov 2009 / NUTS-style)
+    # Works in log-space: log_mu_bar converges to optimal log(mu)
+    log_mu = float(jnp.log(mu))
+    log_mu_bar = log_mu  # running average of log(mu)
+    H_bar = 0.0  # running average of adaptation statistic
+    da_gamma = 0.05  # shrinkage toward initial mu
+    da_t0 = 10  # stabilization offset
+    da_kappa = 0.75  # forgetting rate
+
     t_sample = time.time()
     for step in range(n_warmup):
         (positions, log_probs, key, found, br,
@@ -397,6 +458,18 @@ def run_variant(
                     mu = jnp.clip(best_mu * 1.2, MU_MIN, MU_MAX)
                 else:
                     mu = jnp.clip(best_mu * 0.83, MU_MIN, MU_MAX)
+            elif config.tune_method == "dual_avg":
+                # Dual averaging (Nesterov 2009 / NUTS-style) in log-space.
+                # Targets bracket_ratio ≈ TARGET_RATIO. The adaptation
+                # statistic H = 1 - ratio/target is zero at the target.
+                med_ratio = float(jnp.median(br))
+                m_adapt = (step + 1) // TUNE_INTERVAL
+                w = 1.0 / (m_adapt + da_t0)
+                H_bar = (1.0 - w) * H_bar + w * (1.0 - med_ratio / TARGET_RATIO)
+                log_mu = float(jnp.log(mu)) - (jnp.sqrt(m_adapt) / da_gamma) * H_bar
+                eta = m_adapt ** (-da_kappa)
+                log_mu_bar = eta * log_mu + (1.0 - eta) * log_mu_bar
+                mu = jnp.clip(jnp.exp(log_mu), MU_MIN, MU_MAX)
             else:
                 med_ratio = float(jnp.median(br))
                 ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
@@ -421,9 +494,52 @@ def run_variant(
                   f"({speed:.1f} it/s) best_lp={best:.1f} z_count={int(z_count)} "
                   f"mu={float(mu):.4f} bracket_ratio={med_br:.1f}", flush=True)
 
-    # Finalize ESJD tuning
+    # Warmup auto-extension: if ESJD is still changing rapidly or mu
+    # hasn't stabilized, extend warmup by up to 2x the original length.
+    if tune and n_warmup > 100 and esjd_ema > 0:
+        # Check: is mu still changing significantly between tune intervals?
+        # Use the last bracket_ratio as a proxy — if it's far from target,
+        # warmup hasn't converged.
+        last_br = float(jnp.median(br)) if n_warmup > 0 else TARGET_RATIO
+        mu_unstable = abs(last_br - TARGET_RATIO) > TARGET_RATIO * 0.5
+        max_extra = n_warmup  # at most double the warmup
+        extra_done = 0
+
+        if mu_unstable and config.tune_method == "bracket":
+            if verbose:
+                print(f"  [{config.name}] Warmup auto-extending (bracket_ratio={last_br:.1f}, "
+                      f"target={TARGET_RATIO:.1f})...", flush=True)
+            for extra_step in range(max_extra):
+                (positions, log_probs, key, found, br,
+                 walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = _call_step(
+                    step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
+                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                    walker_aux_ds, temperatures,
+                )
+                z_padded, z_count, z_log_probs = circular_zmatrix.append(
+                    z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+                )
+                extra_done += 1
+                if tune and (extra_step + 1) % TUNE_INTERVAL == 0:
+                    med_ratio = float(jnp.median(br))
+                    ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
+                    if ratio_ema > 0:
+                        adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
+                        mu = jnp.clip(mu * adjustment, MU_MIN, MU_MAX)
+                    # Check convergence
+                    if abs(med_ratio - TARGET_RATIO) <= TARGET_RATIO * 0.3:
+                        break
+            if verbose:
+                print(f"  [{config.name}] Extended warmup by {extra_done} steps "
+                      f"(bracket_ratio now {float(jnp.median(br)):.1f})", flush=True)
+
+    # Finalize adaptive tuning
     if config.tune_method == "esjd" and tune and n_warmup > 0:
         mu = best_mu
+    elif config.tune_method == "dual_avg" and tune and n_warmup > 0:
+        mu = jnp.clip(jnp.exp(log_mu_bar), MU_MIN, MU_MAX)
+        if verbose:
+            print(f"  [{config.name}] Dual-avg final mu: {float(mu):.4f}", flush=True)
 
     # --- Post-warmup setup ---
 
@@ -506,56 +622,140 @@ def run_variant(
         print(f"  [{config.name}] Z-matrix frozen at {int(z_count_frozen)} entries",
               flush=True)
 
-    t_prod = time.time()
-    for step in range(n_production):
-        (positions, log_probs, key, found, br,
-         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
-            positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
-            mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-            walker_aux_ds, temperatures,
-            pca_components, pca_weights, flow_directions, whitening_matrix,
-        )
+    # Streaming diagnostics for live ESS/R-hat monitoring
+    stream_diag = StreamingDiagnostics(n_walkers, n_dim)
 
-        # Replica exchange swaps
-        if config.ensemble == "parallel_tempering":
-            key, k_swap = jax.random.split(key)
-            positions, log_probs = parallel_tempering.propose_swaps(
-                positions, log_probs, temperatures, k_swap,
-                n_temps=ens_kwargs.get("n_temps", 4),
+    # Build a batched scan step for reduced Python overhead.
+    # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
+    SCAN_BATCH = 50
+    use_scan = (config.ensemble != "parallel_tempering")  # scan doesn't support swaps
+
+    if use_scan:
+        @jax.jit
+        def _scan_steps(carry, _):
+            (pos, lps, k, pd, bw, da, ds) = carry
+            (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
+                pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
+                mu, k, pd, bw, da, ds, temperatures,
+                pca_components, pca_weights, flow_directions, whitening_matrix,
             )
+            return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
-        all_samples[step] = np.asarray(positions)
-        all_log_probs[step] = np.asarray(log_probs)
-        all_found[step] = np.asarray(found)
-        all_bracket_ratios[step] = np.asarray(br)
+        def _run_batch(positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                       walker_aux_da, walker_aux_ds, n_batch):
+            carry = (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                     walker_aux_da, walker_aux_ds)
+            carry, outputs = jax.lax.scan(_scan_steps, carry, None, length=n_batch)
+            (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+             walker_aux_da, walker_aux_ds) = carry
+            batch_samples, batch_lps, batch_found, batch_br = outputs
+            return (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                    walker_aux_da, walker_aux_ds,
+                    batch_samples, batch_lps, batch_found, batch_br)
 
-        if verbose and ((step + 1) % 200 == 0 or step == n_production - 1):
+    t_prod = time.time()
+    step_idx = 0
+
+    while step_idx < n_production:
+        # Determine batch size
+        remaining = n_production - step_idx
+        batch_sz = min(SCAN_BATCH, remaining) if use_scan else 1
+
+        if use_scan and batch_sz > 1:
+            # Batched scan
+            (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+             walker_aux_da, walker_aux_ds,
+             batch_samples, batch_lps, batch_found, batch_br) = _run_batch(
+                positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                walker_aux_da, walker_aux_ds, batch_sz,
+            )
+            b_samples = np.asarray(batch_samples)
+            b_lps = np.asarray(batch_lps)
+            b_found = np.asarray(batch_found)
+            b_br = np.asarray(batch_br)
+            for i in range(batch_sz):
+                all_samples[step_idx + i] = b_samples[i]
+                all_log_probs[step_idx + i] = b_lps[i]
+                all_found[step_idx + i] = b_found[i]
+                all_bracket_ratios[step_idx + i] = b_br[i]
+                stream_diag.update(b_samples[i])
+            step_idx += batch_sz
+        else:
+            # Single step (fallback for parallel tempering or last batch)
+            (positions, log_probs, key, found, br,
+             walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
+                positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
+                mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                walker_aux_ds, temperatures,
+                pca_components, pca_weights, flow_directions, whitening_matrix,
+            )
+            if config.ensemble == "parallel_tempering":
+                key, k_swap = jax.random.split(key)
+                positions, log_probs = parallel_tempering.propose_swaps(
+                    positions, log_probs, temperatures, k_swap,
+                    n_temps=ens_kwargs.get("n_temps", 4),
+                )
+            pos_np = np.asarray(positions)
+            all_samples[step_idx] = pos_np
+            all_log_probs[step_idx] = np.asarray(log_probs)
+            all_found[step_idx] = np.asarray(found)
+            all_bracket_ratios[step_idx] = np.asarray(br)
+            stream_diag.update(pos_np)
+            step_idx += 1
+
+        if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
             elapsed = time.time() - t_prod
-            speed = (step + 1) / elapsed
-            eta = (n_production - step - 1) / speed if speed > 0 else 0
-            best = float(all_log_probs[:step+1].max())
-            mean_lp = float(all_log_probs[max(0,step-199):step+1].mean())
-            zero_rate = 1.0 - all_found[max(0,step-199):step+1].mean()
-            print(f"  [{config.name}] {step+1:6d}/{n_production} "
+            speed = step_idx / elapsed if elapsed > 0 else 0
+            eta = (n_production - step_idx) / speed if speed > 0 else 0
+            best = float(all_log_probs[:step_idx].max())
+            mean_lp = float(all_log_probs[max(0,step_idx-200):step_idx].mean())
+            zero_rate = 1.0 - all_found[max(0,step_idx-200):step_idx].mean()
+            diag = stream_diag.summary()
+            print(f"  [{config.name}] {step_idx:6d}/{n_production} "
                   f"({speed:.1f} it/s, ETA {eta:.0f}s) "
                   f"best_lp={best:.1f} mean_lp={mean_lp:.1f} "
-                  f"zero_move={zero_rate:.4f}", flush=True)
+                  f"zero_move={zero_rate:.4f} "
+                  f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
+                  flush=True)
+
+        # Progress callback
+        if progress_fn is not None and step_idx % 50 < batch_sz:
+            elapsed = time.time() - t_prod
+            progress_fn({
+                "step": step_idx,
+                "n_steps": n_production,
+                "ess_min": stream_diag.ess_min(),
+                "rhat_max": stream_diag.rhat_max(),
+                "speed": step_idx / elapsed if elapsed > 0 else 0,
+            })
+
+        # Early stopping: stop when target ESS is reached
+        if target_ess is not None and step_idx >= 100:
+            current_ess = stream_diag.ess_min()
+            if current_ess >= target_ess:
+                if verbose:
+                    print(f"  [{config.name}] Early stop: ESS={current_ess:.0f} >= "
+                          f"target={target_ess:.0f} at step {step_idx}/{n_production}",
+                          flush=True)
+                n_production = step_idx
+                break
 
     wall_time = time.time() - t_prod
 
     return {
-        "samples": jnp.array(all_samples),
-        "log_prob": jnp.array(all_log_probs),
+        "samples": jnp.array(all_samples[:n_production]),
+        "log_prob": jnp.array(all_log_probs[:n_production]),
         "mu": float(mu),
         "z_matrix": z_frozen[:int(z_count_frozen)],
         "config": config,
         "wall_time": wall_time,
         "n_production": n_production,
         "diagnostics": {
-            "found": all_found,
-            "bracket_ratios": all_bracket_ratios,
+            "found": all_found[:n_production],
+            "bracket_ratios": all_bracket_ratios[:n_production],
             "n_expand": n_expand,
             "n_shrink": n_shrink,
-            "cap_hit_rate": 1.0 - all_found.mean(),
+            "cap_hit_rate": 1.0 - all_found[:n_production].mean(),
+            "streaming": stream_diag.summary(),
         },
     }
