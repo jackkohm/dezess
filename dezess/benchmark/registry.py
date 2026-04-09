@@ -267,6 +267,17 @@ VARIANTS = {
         ensemble="standard",
         n_slices_per_step=2,
     ),
+    "local_pair_scale": VariantConfig(
+        name="local_pair_scale",
+        direction="local_pair",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        direction_kwargs={"n_candidates": 10, "local_mix": 0.5},
+        width_kwargs={"scale_factor": 1.0},
+    ),
+
     # NOTE: coordinate directions tested but underperform DE-MCz on
     # correlated targets because axis-aligned slices don't follow the
     # posterior geometry. Available as direction="coordinate" but not
