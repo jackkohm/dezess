@@ -280,20 +280,53 @@ def run_variant(
                         ema_alpha=width_kwargs.get("ema_alpha", 0.1),
                     )
 
-                # Multi-direction: additional sequential slices along fresh DE-MCz directions
+                # Multi-direction: additional sequential slices along
+                # orthogonalized DE-MCz directions (Gibbs-like coordinate cycling).
+                # Each direction is made orthogonal to all previous ones via
+                # Gram-Schmidt, ensuring each slice explores a different subspace.
                 if config.n_slices_per_step > 1:
+                    # prev_dirs stores directions used so far for orthogonalization
+                    # Shape: (max_slices, n_dim) — padded with zeros
+                    n_max_slices = config.n_slices_per_step
+                    ndim_local = x_i.shape[0]
+                    prev_dirs = jnp.zeros((n_max_slices, ndim_local), dtype=jnp.float64)
+                    prev_dirs = prev_dirs.at[0].set(d)  # first direction already used
+
                     def _one_slice(i, carry):
-                        x_c, lp_c, w_key_c, found_c, L_c, R_c = carry
+                        x_c, lp_c, w_key_c, found_c, L_c, R_c, pdirs = carry
                         w_key_c, k_dir = jax.random.split(w_key_c)
                         k_idx1, k_idx2 = jax.random.split(k_dir)
                         idx1 = jax.random.randint(k_idx1, (), 0, z_padded.shape[0]) % z_count
                         idx2 = jax.random.randint(k_idx2, (), 0, z_padded.shape[0]) % z_count
                         idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
                         diff = z_padded[idx1] - z_padded[idx2]
-                        norm = jnp.sqrt(jnp.sum(diff ** 2))
-                        d_new = diff / jnp.maximum(norm, 1e-30)
+
+                        # Gram-Schmidt: remove components along previous directions.
+                        # Use fixed-size loop over all slots, masking by index.
+                        def _gs_step(d_raw, j):
+                            active = j <= i  # only remove for dirs already set
+                            proj = jnp.dot(d_raw, pdirs[j]) * pdirs[j]
+                            d_raw = jnp.where(active, d_raw - proj, d_raw)
+                            return d_raw, None
+                        d_ortho, _ = jax.lax.scan(
+                            _gs_step, diff, jnp.arange(n_max_slices),
+                        )
+
+                        norm_ortho = jnp.sqrt(jnp.sum(d_ortho ** 2))
+                        norm_raw = jnp.sqrt(jnp.sum(diff ** 2))
+                        # Fall back to raw direction if orthogonal component is tiny
+                        use_ortho = norm_ortho > 1e-10 * norm_raw
+                        d_final = jnp.where(use_ortho, d_ortho, diff)
+                        d_norm = jnp.where(use_ortho, norm_ortho, norm_raw)
+                        d_new = d_final / jnp.maximum(d_norm, 1e-30)
+
+                        # Store for next iteration's orthogonalization
+                        pdirs = pdirs.at[i + 1].set(d_new)
+
+                        # Scale-aware width using raw norm
+                        w_aux_c = w_aux._replace(direction_scale=norm_raw)
                         w_key_c, k_w = jax.random.split(w_key_c)
-                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux, key=k_w, **width_kwargs)
+                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w, **width_kwargs)
                         def lp_fn_multi(x):
                             return safe_log_prob(log_prob_fn, x) / temp
                         x_c, _, w_key_c, found_new, L_new, R_new = slice_mod.execute(
@@ -301,10 +334,10 @@ def run_variant(
                             n_expand=n_exp, n_shrink=n_shr,
                         )
                         lp_c = safe_log_prob(log_prob_fn, x_c)
-                        return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new)
+                        return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new, pdirs)
 
-                    init_carry = (x_new, lp_new_untempered, w_key, found, L, R)
-                    x_new, lp_new_untempered, w_key, found, L, R = jax.lax.fori_loop(
+                    init_carry = (x_new, lp_new_untempered, w_key, found, L, R, prev_dirs)
+                    x_new, lp_new_untempered, w_key, found, L, R, _ = jax.lax.fori_loop(
                         0, config.n_slices_per_step - 1, _one_slice, init_carry
                     )
 
