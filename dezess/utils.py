@@ -130,6 +130,76 @@ def summary_stats(
     }
 
 
+def autocorrelation(
+    samples: np.ndarray,
+    max_lag: int = 100,
+    dim: int = 0,
+) -> np.ndarray:
+    """Compute the autocorrelation function for a given dimension.
+
+    Parameters
+    ----------
+    samples : (n_steps, n_walkers, n_dim) or (n_total, n_dim)
+    max_lag : int
+        Maximum lag to compute. Default 100.
+    dim : int
+        Which dimension to compute ACF for.
+
+    Returns
+    -------
+    acf : (max_lag,) array of autocorrelation values at lags 0..max_lag-1.
+    """
+    if samples.ndim == 3:
+        # Use mean chain across walkers
+        chain = samples[:, :, dim].mean(axis=1)
+    elif samples.ndim == 2:
+        chain = samples[:, dim]
+    else:
+        chain = samples
+
+    n = len(chain)
+    max_lag = min(max_lag, n - 1)
+    x = chain - chain.mean()
+    var = np.var(x)
+    if var < 1e-30:
+        return np.zeros(max_lag)
+
+    # FFT-based autocorrelation
+    fft_x = np.fft.fft(x, n=2 * n)
+    acf_full = np.fft.ifft(fft_x * np.conj(fft_x))[:n].real / (n * var)
+    return acf_full[:max_lag]
+
+
+def integrated_autocorr_time(
+    samples: np.ndarray,
+    dim: int = 0,
+) -> float:
+    """Estimate the integrated autocorrelation time (IAT) for a dimension.
+
+    Uses Geyer's initial positive sequence estimator (conservative).
+
+    Parameters
+    ----------
+    samples : (n_steps, n_walkers, n_dim) or (n_total, n_dim)
+    dim : int
+        Dimension to compute IAT for.
+
+    Returns
+    -------
+    float : estimated IAT. ESS ≈ n_samples / IAT.
+    """
+    acf = autocorrelation(samples, max_lag=len(samples) if samples.ndim < 3 else samples.shape[0], dim=dim)
+    n = len(acf)
+
+    # Geyer's initial positive sequence
+    tau = 1.0
+    for lag in range(1, n):
+        tau += 2 * acf[lag]
+        if lag >= 5 * tau:
+            break
+    return max(tau, 1.0)
+
+
 def print_summary(
     samples: np.ndarray,
     param_names: Optional[list] = None,
