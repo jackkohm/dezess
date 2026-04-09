@@ -293,7 +293,8 @@ def init_walkers(
 def _resolve_variant(variant: str, n_dim: int) -> VariantConfig:
     """Resolve a variant name to a VariantConfig."""
     if variant == "auto":
-        # Auto-select: scale_aware is the best all-rounder
+        # scale_aware is the best all-rounder across dimensions.
+        # Tested: momentum, PCA, local_pair all underperform at 30D+.
         return VariantConfig(
             name="scale_aware",
             direction="de_mcz",
