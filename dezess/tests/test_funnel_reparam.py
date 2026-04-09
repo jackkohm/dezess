@@ -181,9 +181,10 @@ def test_geweke_transform_funnel():
     n_walkers = 200
     x_exact = target.sample(key, n_walkers)
 
+    n_warmup_steps = 500
     result = run_variant(
-        target.log_prob, x_exact, n_steps=1, config=config,
-        n_warmup=500, transform=t, verbose=False,
+        target.log_prob, x_exact, n_steps=n_warmup_steps + 1, config=config,
+        n_warmup=n_warmup_steps, transform=t, verbose=False,
     )
     x_out = np.array(result["samples"][0])
 
