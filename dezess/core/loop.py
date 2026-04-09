@@ -78,13 +78,13 @@ ENSEMBLE_STRATEGIES = {
 
 
 DEFAULT_CONFIG = VariantConfig(
-    name="snooker_stochastic",
-    direction="snooker",
-    width="stochastic",
+    name="scale_aware",
+    direction="de_mcz",
+    width="scale_aware",
     slice_fn="fixed",
     zmatrix="circular",
     ensemble="standard",
-    width_kwargs={"sigma": 0.5},
+    width_kwargs={"scale_factor": 1.0},
 )
 
 
