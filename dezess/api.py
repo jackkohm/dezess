@@ -146,12 +146,14 @@ def sample(
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
 
-    # Auto-set warmup: scale with dimension for high-dim problems
+    # Auto-set warmup: ensure enough steps to fill the Z-matrix buffer.
+    # Formula: z_max_size * append_interval / n_walkers, with a minimum.
     if n_warmup is None:
+        z_max = kwargs.get("z_max_size", 50000)
+        append_interval = 5  # Z-matrix appends every 5 warmup steps
+        warmup_to_fill = int(z_max * append_interval / n_walkers_init)
         base_warmup = max(500, n_samples // 4)
-        # High-dim needs more warmup to fill Z-matrix with diverse samples
-        dim_factor = max(1.0, n_dim / 20.0)  # 1x at 20D, 3x at 60D
-        n_warmup = int(base_warmup * dim_factor)
+        n_warmup = max(base_warmup, warmup_to_fill)
 
     # Auto-select variant
     config = _resolve_variant(variant, n_dim)
