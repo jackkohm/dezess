@@ -12,6 +12,27 @@ from typing import Optional
 import numpy as np
 
 
+class LogProbCounter:
+    """Wrapper that counts log-prob evaluations.
+
+    Usage:
+        counter = dezess.LogProbCounter(my_log_prob)
+        result = dezess.sample(counter, init, n_samples=1000)
+        print(f"Total evaluations: {counter.count}")
+    """
+
+    def __init__(self, log_prob_fn):
+        self._fn = log_prob_fn
+        self.count = 0
+
+    def __call__(self, x):
+        self.count += 1
+        return self._fn(x)
+
+    def reset(self):
+        self.count = 0
+
+
 def flatten_samples(samples: np.ndarray) -> np.ndarray:
     """Flatten (n_steps, n_walkers, n_dim) -> (n_total, n_dim).
 

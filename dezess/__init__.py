@@ -5,6 +5,7 @@ from dezess.core.loop import run_variant, DEFAULT_CONFIG
 from dezess.core.types import VariantConfig
 from dezess.api import sample, SampleResult, init_walkers, diagnose
 from dezess.utils import (
+    LogProbCounter,
     flatten_samples, thin_samples, summary_stats, print_summary,
     autocorrelation, integrated_autocorr_time,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "thin_samples",
     "summary_stats",
     "print_summary",
+    "LogProbCounter",
     "autocorrelation",
     "integrated_autocorr_time",
     "save_checkpoint",
