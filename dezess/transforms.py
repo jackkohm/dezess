@@ -40,3 +40,40 @@ def identity() -> Transform:
         inverse=lambda x: x,
         log_det_jac=lambda z: jnp.float64(0.0),
     )
+
+
+def non_centered_funnel(
+    width_idx: int,
+    offset_indices: Sequence[int],
+) -> Transform:
+    """Non-centered parameterization for a Neal's funnel block.
+
+    In the original space x:
+        x[width_idx] = log_width ~ N(0, 9)
+        x[offset_i]  ~ N(0, exp(log_width))  (funnel geometry)
+
+    In the unconstrained space z:
+        z[width_idx] = log_width  (unchanged)
+        z[offset_i]  ~ N(0, 1)   (standard Gaussian — no funnel)
+
+    Forward (z -> x):  x[offset_i] = z[offset_i] * exp(z[width_idx] / 2)
+    Inverse (x -> z):  z[offset_i] = x[offset_i] / exp(x[width_idx] / 2)
+    Log-det-Jacobian:  n_offsets * z[width_idx] / 2
+    """
+    offset_idx = jnp.array(offset_indices, dtype=jnp.int32)
+    n_offsets = len(offset_indices)
+
+    def forward(z):
+        scale = jnp.exp(z[width_idx] / 2.0)
+        x = z.at[offset_idx].set(z[offset_idx] * scale)
+        return x
+
+    def inverse(x):
+        scale = jnp.exp(x[width_idx] / 2.0)
+        z = x.at[offset_idx].set(x[offset_idx] / scale)
+        return z
+
+    def log_det_jac(z):
+        return jnp.float64(n_offsets) * z[width_idx] / 2.0
+
+    return Transform(forward=forward, inverse=inverse, log_det_jac=log_det_jac)
