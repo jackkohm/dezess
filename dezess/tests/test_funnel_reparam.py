@@ -190,3 +190,36 @@ def test_geweke_transform_funnel():
 
     _, p_val = stats.kstest(x_out[:, 0] / 3.0, "norm")
     assert p_val > 0.001, f"Geweke failed on log-width dim: KS p={p_val:.4f}"
+
+
+def test_block_gibbs_block_coupled():
+    """Block-Gibbs on block_coupled_gaussian should converge (R-hat < 1.2)."""
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+    from dezess.targets_stream import block_coupled_gaussian
+    from dezess.benchmark.metrics import compute_rhat
+
+    target = block_coupled_gaussian()  # 63D
+
+    config = VariantConfig(
+        name="block_gibbs_test",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
+    )
+
+    key = jax.random.PRNGKey(0)
+    init = target.sample(key, 128)
+
+    result = run_variant(
+        target.log_prob, init, n_steps=5000,
+        config=config, n_warmup=4000, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    rhat = compute_rhat(samples)
+    rhat_max = float(np.max(rhat))
+    assert rhat_max < 1.2, f"Block-Gibbs R-hat={rhat_max:.4f} on block_coupled (want < 1.2)"
