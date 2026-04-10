@@ -425,6 +425,7 @@ def run_variant(
     # --- Block-Gibbs setup ---
     use_block_gibbs = config.ensemble == "block_gibbs"
     use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
+    use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
 
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
@@ -508,7 +509,7 @@ def run_variant(
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
                 def _mh_walker(x_full, lp, wk):
-                    wk, k1, k2, k_accept = jax.random.split(wk, 4)
+                    wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
                     idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
@@ -519,29 +520,56 @@ def run_variant(
                     diff = (z1_block - z2_block) * mask
                     norm = jnp.sqrt(jnp.sum(diff**2))
 
-                    # Scale-aware step: propose along DE direction
+                    # Scale-aware step
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
 
-                    # Full-space direction (only block dims move)
+                    # Full-space direction
                     d_block = diff / jnp.maximum(norm, 1e-30)
                     d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                     d_full = d_full.at[b_idx].add(d_block * mask)
 
-                    # Single MH proposal
-                    x_prop = x_full + mu_eff * d_full
-                    lp_prop = safe_log_prob(log_prob_fn, x_prop)
+                    # Stage 1: full-scale proposal
+                    x_prop1 = x_full + mu_eff * d_full
+                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
+                    accept1 = log_u1 < (lp_prop1 - lp)
 
-                    # Accept/reject (symmetric proposal)
-                    log_u = jnp.log(jax.random.uniform(
-                        k_accept, dtype=jnp.float64) + 1e-30)
-                    accept = log_u < (lp_prop - lp)
-                    x_new = jnp.where(accept, x_prop, x_full)
-                    lp_new = jnp.where(accept, lp_prop, lp)
-                    # Bracket proxy calibrated so 50% acceptance → mean_br = TARGET_RATIO
-                    # TARGET_RATIO = n_expand + 1 (captured from outer scope)
+                    if use_delayed_rejection:
+                        # Stage 2: smaller step, new DE direction
+                        wk, k3, k4, k_accept2 = jax.random.split(wk, 4)
+                        idx3 = jax.random.randint(k3, (), 0, z_padded.shape[0]) % z_count
+                        idx4 = jax.random.randint(k4, (), 0, z_padded.shape[0]) % z_count
+                        idx4 = jnp.where(idx3 == idx4, (idx3 + 1) % z_count, idx4)
+
+                        z3_block = z_padded[idx3][b_idx]
+                        z4_block = z_padded[idx4][b_idx]
+                        diff2 = (z3_block - z4_block) * mask
+                        norm2 = jnp.sqrt(jnp.sum(diff2**2))
+                        mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
+
+                        d_block2 = diff2 / jnp.maximum(norm2, 1e-30)
+                        d_full2 = jnp.zeros(n_dim, dtype=jnp.float64)
+                        d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
+
+                        x_prop2 = x_full + mu_eff2 * d_full2
+                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
+                        accept2 = log_u2 < (lp_prop2 - lp)
+
+                        # Stage 1 wins if accepted, else stage 2, else stay
+                        x_new = jnp.where(accept1, x_prop1,
+                                jnp.where(accept2, x_prop2, x_full))
+                        lp_new = jnp.where(accept1, lp_prop1,
+                                 jnp.where(accept2, lp_prop2, lp))
+                        either_accepted = accept1 | accept2
+                    else:
+                        x_new = jnp.where(accept1, x_prop1, x_full)
+                        lp_new = jnp.where(accept1, lp_prop1, lp)
+                        either_accepted = accept1
+
                     target = jnp.float64(n_expand + 1)
-                    br = jnp.where(accept, 2.0 * target - 1.0, 1.0)
+                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
                     return x_new, lp_new, wk, br
 
                 k, k_walkers = jax.random.split(k)
