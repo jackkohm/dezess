@@ -147,6 +147,50 @@ def test_local_pair():
     _run_and_check_variance(config, "local_pair_scale")
 
 
+def test_nurs():
+    """NURS (orbit-based categorical sampling) without MH."""
+    config = VariantConfig(
+        name="nurs",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 5, "use_mh": False},
+    )
+    _run_and_check_variance(config, "nurs")
+
+
+def test_nurs_mh():
+    """NURS with Metropolis-Hastings correction."""
+    config = VariantConfig(
+        name="nurs_mh",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 3, "use_mh": True},
+    )
+    _run_and_check_variance(config, "nurs_mh")
+
+
+def test_nurs_scalar():
+    """NURS with scalar (non-scale-aware) width."""
+    config = VariantConfig(
+        name="nurs_scalar",
+        direction="de_mcz",
+        width="scalar",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        slice_kwargs={"n_expand": 5, "use_mh": False},
+    )
+    _run_and_check_variance(config, "nurs_scalar")
+
+
 def test_original_sampler():
     """The original run_demcz_slice path must also pass."""
     init = jax.random.normal(jax.random.PRNGKey(42), (N_WALKERS, NDIM)) * 0.1

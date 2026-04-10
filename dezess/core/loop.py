@@ -32,7 +32,7 @@ from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, rie
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
 # Slice modules
-from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed
+from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
@@ -73,6 +73,7 @@ SLICE_STRATEGIES = {
     "delayed_rejection": delayed_rejection,
     "early_stop": early_stop,
     "overrelaxed": overrelaxed,
+    "nurs": nurs_slice,
 }
 
 ZMATRIX_STRATEGIES = {

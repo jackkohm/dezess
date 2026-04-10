@@ -391,6 +391,37 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
         ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
     ),
+
+    # --- NURS (No-Underrun Sampler) variants ---
+    "nurs": VariantConfig(
+        name="nurs",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 5, "use_mh": False},
+    ),
+    "nurs_mh": VariantConfig(
+        name="nurs_mh",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 3, "use_mh": True},
+    ),
+    "nurs_scalar": VariantConfig(
+        name="nurs_scalar",
+        direction="de_mcz",
+        width="scalar",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        slice_kwargs={"n_expand": 5, "use_mh": False},
+    ),
 }
 
 
