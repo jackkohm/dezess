@@ -157,13 +157,13 @@ def test_nurs():
         zmatrix="circular",
         ensemble="standard",
         width_kwargs={"scale_factor": 1.0},
-        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
     )
     _run_and_check_variance(config, "nurs")
 
 
 def test_nurs_deep():
-    """NURS with deeper orbit (max 128 points)."""
+    """NURS with deeper orbit (max 32 points)."""
     config = VariantConfig(
         name="nurs_deep",
         direction="de_mcz",
@@ -172,7 +172,7 @@ def test_nurs_deep():
         zmatrix="circular",
         ensemble="standard",
         width_kwargs={"scale_factor": 1.0},
-        slice_kwargs={"n_expand": 7, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
     )
     _run_and_check_variance(config, "nurs_deep")
 
@@ -186,7 +186,7 @@ def test_nurs_scalar():
         slice_fn="nurs",
         zmatrix="circular",
         ensemble="standard",
-        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
     )
     _run_and_check_variance(config, "nurs_scalar")
 

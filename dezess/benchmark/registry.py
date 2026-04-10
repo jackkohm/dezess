@@ -401,7 +401,7 @@ VARIANTS = {
         zmatrix="circular",
         ensemble="standard",
         width_kwargs={"scale_factor": 1.0},
-        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
     ),
     "nurs_deep": VariantConfig(
         name="nurs_deep",
@@ -411,7 +411,7 @@ VARIANTS = {
         zmatrix="circular",
         ensemble="standard",
         width_kwargs={"scale_factor": 1.0},
-        slice_kwargs={"n_expand": 7, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
     ),
     "nurs_scalar": VariantConfig(
         name="nurs_scalar",
@@ -420,7 +420,7 @@ VARIANTS = {
         slice_fn="nurs",
         zmatrix="circular",
         ensemble="standard",
-        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
     ),
 }
 

@@ -1,4 +1,4 @@
-"""NURS: No-Underrun Sampler — faithful, optimised implementation.
+"""NURS: No-Underrun Sampler — faithful implementation.
 
 Implements Algorithm 2 from Bou-Rabee, Carpenter, Liu & Oberdörster (2025),
 "The No-Underrun Sampler: A Locally-Adaptive, Gradient-Free MCMC Method",
@@ -21,11 +21,12 @@ The algorithm has three phases:
    the streaming process is already a sample from the categorical
    distribution over all orbit points, weighted by target density.
 
-Performance note: all ``2^M`` orbit log-prob evaluations are done in a
-single flat ``fori_loop`` (phase 2a).  The subsequent doubling logic
-(phase 2b) operates only on the *pre-computed* values and is cheap.
-This avoids the nested-loop overhead of evaluating ``log_prob_fn``
-inside the doubling loop.
+Performance note: all ``2^M`` orbit log-prob evaluations are batched
+into a single flat ``fori_loop`` (phase 2a).  The subsequent doubling
+logic (phase 2b) operates only on *pre-computed* values and is cheap.
+Total evaluations per step: ``2^M + 1`` (orbit + shift proposal).
+Use ``n_expand=3`` (8 evals) to match the default slice budget, or
+``n_expand=5`` (32 evals) for deeper exploration.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def execute(
     lp_x: Array,
     mu: Array,
     key: Array,
-    n_expand: int = 5,
+    n_expand: int = 3,
     n_shrink: int = 12,
     density_threshold: float = 0.001,
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
@@ -61,7 +62,8 @@ def execute(
     n_expand : int
         Maximum number of orbit doublings (*M* in the paper).
         The orbit can grow to ``2^n_expand`` lattice points.
-        Total log-prob evaluations: ``2^n_expand + 1`` (orbit + shift).
+        Total log-prob evaluations: ``2^n_expand + 1``.
+        Default 3 (8 evals) matches the default slice budget.
     n_shrink : int
         Unused (interface compatibility with other slice strategies).
     density_threshold : float
@@ -72,7 +74,7 @@ def execute(
     """
     max_doublings = n_expand
     h = mu
-    max_orbit = 2 ** max_doublings       # e.g. 32 for M=5
+    max_orbit = 2 ** max_doublings       # e.g. 8 for M=3
     max_ext = max_orbit // 2             # max batch per doubling
 
     # ================================================================
