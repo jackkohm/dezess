@@ -1185,7 +1185,7 @@ def run_variant(
     use_scan = (config.ensemble not in ("parallel_tempering", "block_gibbs")) and not live_z
 
     if use_scan:
-        @jax.jit(donate_argnums=(0,))  # donate carry (positions/log_probs inside)
+        @jax.jit
         def _scan_steps(carry, _):
             (pos, lps, k, pd, bw, da, ds) = carry
             (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
