@@ -114,6 +114,8 @@ def run_variant(
     progress_fn: Optional[Callable] = None,
     verbose: bool = True,
     transform: Optional[Transform] = None,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_interval: int = 0,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -939,6 +941,23 @@ def run_variant(
                           flush=True)
                 n_production = step_idx
                 break
+
+        # Periodic checkpointing
+        if checkpoint_path and checkpoint_interval > 0 and step_idx % checkpoint_interval == 0 and step_idx > 0:
+            from dezess.checkpoint import save_checkpoint
+            ckpt_result = {
+                "samples": all_samples[:step_idx],
+                "log_prob": all_log_probs[:step_idx],
+                "mu": float(mu) if not use_block_gibbs else float(mu_blocks[0]),
+                "z_matrix": z_frozen[:int(z_count_frozen)],
+                "config": config,
+            }
+            if use_block_gibbs:
+                ckpt_result["mu_blocks"] = mu_blocks
+            save_checkpoint(checkpoint_path, ckpt_result)
+            if verbose:
+                print(f"  [{config.name}] Checkpoint saved at step {step_idx} -> {checkpoint_path}",
+                      flush=True)
 
     wall_time = time.time() - t_prod
 

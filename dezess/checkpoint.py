@@ -10,6 +10,10 @@ Usage:
 
     # Resume for more samples
     result2 = dezess.resume("run1.npz", log_prob, n_samples=2000)
+
+    # Resume with a transform (must pass same transform used originally)
+    result3 = dezess.resume("run1.npz", log_prob, n_samples=2000,
+                            transform=my_transform)
 """
 
 from __future__ import annotations
@@ -51,8 +55,10 @@ def save_checkpoint(path: str, result: dict) -> None:
     if "config" in result and result["config"] is not None:
         config_name = result["config"].name
 
-    np.savez(
-        path,
+    # Save mu_blocks if block-Gibbs was used
+    mu_blocks = result.get("mu_blocks", None)
+
+    save_dict = dict(
         final_positions=final_positions,
         final_log_probs=final_lps,
         mu=np.float64(mu),
@@ -61,16 +67,20 @@ def save_checkpoint(path: str, result: dict) -> None:
         samples=samples,
         log_prob=log_prob,
     )
+    if mu_blocks is not None:
+        save_dict["mu_blocks"] = np.asarray(mu_blocks)
+
+    np.savez(path, **save_dict)
 
 
 def load_checkpoint(path: str) -> dict:
     """Load a checkpoint file.
 
     Returns dict with: final_positions, final_log_probs, mu, z_matrix,
-    config_name, samples, log_prob.
+    config_name, samples, log_prob, and optionally mu_blocks.
     """
     data = np.load(path, allow_pickle=False)
-    return {
+    result = {
         "final_positions": data["final_positions"],
         "final_log_probs": data["final_log_probs"],
         "mu": float(data["mu"]),
@@ -79,6 +89,9 @@ def load_checkpoint(path: str) -> dict:
         "samples": data["samples"],
         "log_prob": data["log_prob"],
     }
+    if "mu_blocks" in data:
+        result["mu_blocks"] = data["mu_blocks"]
+    return result
 
 
 def resume(
@@ -87,6 +100,7 @@ def resume(
     n_samples: int = 2000,
     target_ess: Optional[float] = None,
     variant: Optional[str] = None,
+    transform=None,
     seed: int = 1,
     verbose: bool = True,
 ) -> dict:
@@ -107,6 +121,10 @@ def resume(
         Early stopping target (ESS across new + old samples).
     variant : str or None
         Variant to use. If None, uses the variant from the checkpoint.
+    transform : Transform or None
+        Same transform used in the original run. Required if the original
+        run used a transform — checkpoint stores x-space samples but
+        the sampler works in z-space.
     seed : int
         Random seed for the resumed run.
     verbose : bool
@@ -145,6 +163,7 @@ def resume(
         tune=False,  # already tuned
         z_initial=z_initial,
         target_ess=target_ess,
+        transform=transform,
         verbose=verbose,
     )
 
