@@ -961,16 +961,13 @@ def run_variant(
 
     wall_time = time.time() - t_prod
 
-    # --- Map samples and log_probs back to x-space ---
+    # --- Map samples back to x-space ---
     if transform is not None:
+        all_samples_x = np.zeros_like(all_samples[:n_production])
         _fwd_vmap = jax.jit(jax.vmap(transform.forward))
-        _raw_lp_vmap = jax.jit(jax.vmap(
-            lambda z: safe_log_prob(_original_log_prob, transform.forward(z))
-        ))
         for i in range(n_production):
-            z_step = jnp.array(all_samples[i])
-            all_samples[i] = np.asarray(_fwd_vmap(z_step))
-            all_log_probs[i] = np.asarray(_raw_lp_vmap(z_step))
+            all_samples_x[i] = np.asarray(_fwd_vmap(jnp.array(all_samples[i])))
+        all_samples[:n_production] = all_samples_x
 
     result = {
         "samples": jnp.array(all_samples[:n_production]),
