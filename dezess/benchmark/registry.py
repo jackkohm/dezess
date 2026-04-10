@@ -404,6 +404,51 @@ VARIANTS = {
         ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14], "use_mh": True},
     ),
 
+    # --- Enhanced Block-Gibbs MH variants ---
+    "block_gibbs_mh_dr": VariantConfig(
+        name="block_gibbs_mh_dr",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={
+            "block_sizes": [7, 14, 14, 14, 14],
+            "use_mh": True,
+            "delayed_rejection": True,
+        },
+    ),
+    "block_gibbs_mh_cov": VariantConfig(
+        name="block_gibbs_mh_cov",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={
+            "block_sizes": [7, 14, 14, 14, 14],
+            "use_mh": True,
+            "use_block_cov": True,
+        },
+    ),
+    "block_gibbs_mh_full": VariantConfig(
+        name="block_gibbs_mh_full",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={
+            "block_sizes": [7, 14, 14, 14, 14],
+            "use_mh": True,
+            "delayed_rejection": True,
+            "use_block_cov": True,
+        },
+    ),
+
     # --- NURS (No-Underrun Sampler) variants ---
     "nurs": VariantConfig(
         name="nurs",
