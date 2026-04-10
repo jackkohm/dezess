@@ -24,6 +24,7 @@ class VariantConfig(NamedTuple):
     ensemble: str = "standard"
     tune_method: str = "bracket"       # "bracket" or "esjd"
     n_slices_per_step: int = 1         # >1 = multi-direction steps
+    check_nans: bool = True            # False skips isfinite checks in production
     # Strategy-specific kwargs (e.g. momentum alpha, stochastic sigma)
     direction_kwargs: dict = {}
     width_kwargs: dict = {}

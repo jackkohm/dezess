@@ -22,7 +22,7 @@ import numpy as np
 from jax import lax
 
 from dezess.core.types import VariantConfig, WalkerAux, SamplerState
-from dezess.core.slice_sample import safe_log_prob
+from dezess.core.slice_sample import safe_log_prob, unsafe_log_prob
 from dezess.diagnostics import StreamingDiagnostics
 from dezess.transforms import Transform, identity
 
@@ -161,6 +161,9 @@ def run_variant(
     zmat_mod = ZMATRIX_STRATEGIES[config.zmatrix]
     ens_mod = ENSEMBLE_STRATEGIES[config.ensemble]
 
+    # Select log_prob evaluator: skip NaN checks when config.check_nans=False
+    lp_eval = safe_log_prob if config.check_nans else unsafe_log_prob
+
     dir_kwargs = dict(config.direction_kwargs)
     # For gradient directions, compute grad_fn from log_prob
     if config.direction == "gradient":
@@ -285,15 +288,15 @@ def run_variant(
                     z_anchor = w_aux.direction_anchor
                     ndim_j = x_i.shape[0]
                     def lp_fn(x):
-                        base = safe_log_prob(log_prob_fn, x) / temp
-                        dist = jnp.sqrt(jnp.sum((x - z_anchor)**2))
+                        base = lp_eval(log_prob_fn, x) / temp
+                        dist = jnp.linalg.norm(x - z_anchor)
                         return base + (ndim_j - 1) * jnp.log(jnp.maximum(dist, 1e-30))
 
-                    dist_0 = jnp.sqrt(jnp.sum((x_i - z_anchor)**2))
+                    dist_0 = jnp.linalg.norm(x_i - z_anchor)
                     lp_x_slice = lp_i / temp + (ndim_j - 1) * jnp.log(jnp.maximum(dist_0, 1e-30))
                 else:
                     def lp_fn(x):
-                        return safe_log_prob(log_prob_fn, x) / temp
+                        return lp_eval(log_prob_fn, x) / temp
 
                     lp_x_slice = lp_i / temp
 
@@ -318,7 +321,7 @@ def run_variant(
                 # redundant evaluation. But during warmup tempering (temp > 1)
                 # or with snooker/tempering, we must re-evaluate.
                 if config.direction == "snooker" or config.ensemble == "parallel_tempering":
-                    lp_new_untempered = safe_log_prob(log_prob_fn, x_new)
+                    lp_new_untempered = lp_eval(log_prob_fn, x_new)
                 else:
                     # temp=1 in production; during warmup tempering this will
                     # be re-evaluated in the warmup loop when needed
@@ -353,18 +356,15 @@ def run_variant(
                         diff = z_padded[idx1] - z_padded[idx2]
 
                         # Gram-Schmidt: remove components along previous directions.
-                        # Use fixed-size loop over all slots, masking by index.
-                        def _gs_step(d_raw, j):
-                            active = j <= i  # only remove for dirs already set
+                        # Only iterate over directions already set (i+1 is traced,
+                        # valid for fori_loop bounds unlike scan which needs static length).
+                        def _ortho_one(j, d_raw):
                             proj = jnp.dot(d_raw, pdirs[j]) * pdirs[j]
-                            d_raw = jnp.where(active, d_raw - proj, d_raw)
-                            return d_raw, None
-                        d_ortho, _ = jax.lax.scan(
-                            _gs_step, diff, jnp.arange(n_max_slices),
-                        )
+                            return d_raw - proj
+                        d_ortho = jax.lax.fori_loop(0, i + 1, _ortho_one, diff)
 
-                        norm_ortho = jnp.sqrt(jnp.sum(d_ortho ** 2))
-                        norm_raw = jnp.sqrt(jnp.sum(diff ** 2))
+                        norm_ortho = jnp.linalg.norm(d_ortho)
+                        norm_raw = jnp.linalg.norm(diff)
                         # Fall back to raw direction if orthogonal component is tiny
                         use_ortho = norm_ortho > 1e-10 * norm_raw
                         d_final = jnp.where(use_ortho, d_ortho, diff)
@@ -379,12 +379,12 @@ def run_variant(
                         w_key_c, k_w = jax.random.split(w_key_c)
                         mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w, **width_kwargs)
                         def lp_fn_multi(x):
-                            return safe_log_prob(log_prob_fn, x) / temp
+                            return lp_eval(log_prob_fn, x) / temp
                         x_c, _, w_key_c, found_new, L_new, R_new = slice_mod.execute(
                             lp_fn_multi, x_c, d_new, lp_c / temp, mu_eff_c, w_key_c,
                             n_expand=n_exp, n_shrink=n_shr,
                         )
-                        lp_c = safe_log_prob(log_prob_fn, x_c)
+                        lp_c = lp_eval(log_prob_fn, x_c)
                         return (x_c, lp_c, w_key_c, found_c & found_new, L_new, R_new, pdirs)
 
                     init_carry = (x_new, lp_new_untempered, w_key, found, L, R, prev_dirs)
@@ -463,10 +463,10 @@ def run_variant(
                     idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
                     # Direction in block subspace (full padded size)
-                    z1_block = z_padded[idx1][b_idx]  # (max_block_size,)
-                    z2_block = z_padded[idx2][b_idx]
+                    z1_block = z_padded[idx1, b_idx]  # (max_block_size,)
+                    z2_block = z_padded[idx2, b_idx]
                     diff = (z1_block - z2_block) * mask  # zero out padding
-                    norm = jnp.sqrt(jnp.sum(diff**2))
+                    norm = jnp.linalg.norm(diff)
                     d_block = diff / jnp.maximum(norm, 1e-30)
 
                     # Embed into full space: scatter block direction
@@ -479,7 +479,7 @@ def run_variant(
 
                     # Slice sample
                     x_new, lp_new, wk, found, L, R = slice_sample_fixed(
-                        lambda x: safe_log_prob(log_prob_fn, x),
+                        lambda x: lp_eval(log_prob_fn, x),
                         x_full, d_full, lp, mu_eff, wk,
                         n_expand=n_expand, n_shrink=n_shrink,
                     )
@@ -521,10 +521,10 @@ def run_variant(
                     idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
                     # DE direction in block subspace
-                    z1_block = z_padded[idx1][b_idx]
-                    z2_block = z_padded[idx2][b_idx]
+                    z1_block = z_padded[idx1, b_idx]
+                    z2_block = z_padded[idx2, b_idx]
                     diff = (z1_block - z2_block) * mask
-                    norm = jnp.sqrt(jnp.sum(diff**2))
+                    norm = jnp.linalg.norm(diff)
 
                     # Scale-aware step
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
@@ -537,7 +537,7 @@ def run_variant(
 
                     # Stage 1: full-scale proposal
                     x_prop1 = x_full + mu_eff * d_full
-                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    lp_prop1 = lp_eval(log_prob_fn, x_prop1)
                     log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
                     accept1 = log_u1 < (lp_prop1 - lp)
 
@@ -548,10 +548,10 @@ def run_variant(
                         idx4 = jax.random.randint(k4, (), 0, z_padded.shape[0]) % z_count
                         idx4 = jnp.where(idx3 == idx4, (idx3 + 1) % z_count, idx4)
 
-                        z3_block = z_padded[idx3][b_idx]
-                        z4_block = z_padded[idx4][b_idx]
+                        z3_block = z_padded[idx3, b_idx]
+                        z4_block = z_padded[idx4, b_idx]
                         diff2 = (z3_block - z4_block) * mask
-                        norm2 = jnp.sqrt(jnp.sum(diff2**2))
+                        norm2 = jnp.linalg.norm(diff2)
                         mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
 
                         d_block2 = diff2 / jnp.maximum(norm2, 1e-30)
@@ -559,7 +559,7 @@ def run_variant(
                         d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
 
                         x_prop2 = x_full + mu_eff2 * d_full2
-                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        lp_prop2 = lp_eval(log_prob_fn, x_prop2)
                         log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
                         accept2 = log_u2 < (lp_prop2 - lp)
 
@@ -598,7 +598,7 @@ def run_variant(
     if verbose:
         print(f"  [{config.name}] Computing initial log-probs...", flush=True)
     positions = jnp.array(init_positions, dtype=jnp.float64)
-    log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
+    log_probs = jax.jit(jax.vmap(lambda x: lp_eval(log_prob_fn, x)))(positions)
     log_probs.block_until_ready()
 
     # Populate initial Z log probs
@@ -703,7 +703,7 @@ def run_variant(
             # During warmup tempering, the stored lp_new is tempered (log_prob / temp).
             # Re-evaluate at T=1 so the next step sees the correct untempered value.
             if warmup_t_start > 1.0 and warmup_temp > 1.001:
-                log_probs = jax.jit(jax.vmap(lambda x: safe_log_prob(log_prob_fn, x)))(positions)
+                log_probs = jax.jit(jax.vmap(lambda x: lp_eval(log_prob_fn, x)))(positions)
 
         # Append to Z-matrix (every 5 steps to reduce overhead)
         if step % 5 == 0 or step == n_warmup - 1:
@@ -946,7 +946,7 @@ def run_variant(
                     z_rand = z_rand * mask  # zero out padding dims
                     delta = L_b @ z_rand
                     delta = delta * mask
-                    norm = jnp.sqrt(jnp.sum(delta**2))
+                    norm = jnp.linalg.norm(delta)
                     d_block = delta / jnp.maximum(norm, 1e-30)
 
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
@@ -957,7 +957,7 @@ def run_variant(
 
                     # Stage 1
                     x_prop1 = x_full + mu_eff * d_full
-                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    lp_prop1 = lp_eval(log_prob_fn, x_prop1)
                     log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
                     accept1 = log_u1 < (lp_prop1 - lp)
 
@@ -968,7 +968,7 @@ def run_variant(
                         z_rand2 = z_rand2 * mask
                         delta2 = L_b @ z_rand2
                         delta2 = delta2 * mask
-                        norm2 = jnp.sqrt(jnp.sum(delta2**2))
+                        norm2 = jnp.linalg.norm(delta2)
                         d_block2 = delta2 / jnp.maximum(norm2, 1e-30)
                         mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
 
@@ -976,7 +976,7 @@ def run_variant(
                         d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
 
                         x_prop2 = x_full + mu_eff2 * d_full2
-                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        lp_prop2 = lp_eval(log_prob_fn, x_prop2)
                         log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
                         accept2 = log_u2 < (lp_prop2 - lp)
 
@@ -1038,10 +1038,10 @@ def run_variant(
                 idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
-                z1_b = z_padded[idx1][pot_b_idx]
-                z2_b = z_padded[idx2][pot_b_idx]
+                z1_b = z_padded[idx1, pot_b_idx]
+                z2_b = z_padded[idx2, pot_b_idx]
                 diff = (z1_b - z2_b) * pot_mask
-                norm = jnp.sqrt(jnp.sum(diff**2))
+                norm = jnp.linalg.norm(diff)
                 dim_corr = jnp.sqrt(jnp.float64(pot_bsize) / 2.0)
                 mu_eff = pot_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
@@ -1050,7 +1050,7 @@ def run_variant(
                 d_full = d_full.at[pot_b_idx].add(d_block * pot_mask)
 
                 x_prop = x_full + mu_eff * d_full
-                lp_prop = safe_log_prob(log_prob_fn, x_prop)
+                lp_prop = lp_eval(log_prob_fn, x_prop)
                 log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
                 accept = log_u < (lp_prop - lp)
                 x_new = jnp.where(accept, x_prop, x_full)
@@ -1080,10 +1080,10 @@ def run_variant(
                 idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
-                z1_b = z_padded[idx1][s_b_idx]
-                z2_b = z_padded[idx2][s_b_idx]
+                z1_b = z_padded[idx1, s_b_idx]
+                z2_b = z_padded[idx2, s_b_idx]
                 diff = (z1_b - z2_b) * s_mask
-                norm = jnp.sqrt(jnp.sum(diff**2))
+                norm = jnp.linalg.norm(diff)
                 dim_corr = jnp.sqrt(jnp.float64(s_bsize) / 2.0)
                 mu_eff = s_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
@@ -1139,7 +1139,7 @@ def run_variant(
             positions = jax.vmap(_update_all_streams_one_walker)(positions, stream_keys)
 
             # ---- Round 3: Re-evaluate full log_prob for consistency ----
-            log_probs = jax.vmap(lambda x: safe_log_prob(log_prob_fn, x))(positions)
+            log_probs = jax.vmap(lambda x: lp_eval(log_prob_fn, x))(positions)
 
             mean_br = jnp.float64(n_expand + 1)  # neutral bracket ratio
             return positions, log_probs, key, mean_br
@@ -1185,7 +1185,7 @@ def run_variant(
     use_scan = (config.ensemble not in ("parallel_tempering", "block_gibbs")) and not live_z
 
     if use_scan:
-        @jax.jit
+        @jax.jit(donate_argnums=(0,))  # donate carry (positions/log_probs inside)
         def _scan_steps(carry, _):
             (pos, lps, k, pd, bw, da, ds) = carry
             (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(

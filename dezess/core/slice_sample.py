@@ -19,6 +19,11 @@ def safe_log_prob(log_prob_fn: Callable, x: Array) -> Array:
     return jnp.where(jnp.isfinite(lp), lp, jnp.float64(-1e30))
 
 
+def unsafe_log_prob(log_prob_fn: Callable, x: Array) -> Array:
+    """Evaluate log_prob without NaN/Inf checking. Use after warmup verification."""
+    return log_prob_fn(x)
+
+
 def slice_sample_fixed(
     log_prob_fn: Callable,
     x: Array,

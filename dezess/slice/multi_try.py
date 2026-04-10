@@ -72,7 +72,7 @@ def execute(
     idx2s = jnp.where(idx1s == idx2s, (idx2s + 1) % z_count, idx2s)
 
     diffs = z_matrix[idx1s] - z_matrix[idx2s]        # (K, ndim)
-    norms = jnp.sqrt(jnp.sum(diffs ** 2, axis=1))    # (K,)
+    norms = jnp.linalg.norm(diffs, axis=1)    # (K,)
     dirs = diffs / jnp.maximum(norms, 1e-30)[:, None] # (K, ndim)
 
     # Scale-aware width per direction
@@ -108,7 +108,7 @@ def execute(
     )
 
     ref_diffs = z_matrix[ref_idx1s] - z_matrix[ref_idx2s]
-    ref_norms = jnp.sqrt(jnp.sum(ref_diffs ** 2, axis=1))
+    ref_norms = jnp.linalg.norm(ref_diffs, axis=1)
     ref_dirs = ref_diffs / jnp.maximum(ref_norms, 1e-30)[:, None]
     ref_mu_effs = mu_base * ref_norms / jnp.maximum(dim_corr, 1e-30)
 
