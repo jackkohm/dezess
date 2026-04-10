@@ -392,6 +392,18 @@ VARIANTS = {
         ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14]},
     ),
 
+    # --- Block-Gibbs MH (1 eval per block, no slice) ---
+    "block_gibbs_mh": VariantConfig(
+        name="block_gibbs_mh",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"block_sizes": [7, 14, 14, 14, 14], "use_mh": True},
+    ),
+
     # --- NURS (No-Underrun Sampler) variants ---
     "nurs": VariantConfig(
         name="nurs",
@@ -421,6 +433,30 @@ VARIANTS = {
         zmatrix="circular",
         ensemble="standard",
         slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
+    ),
+
+    # --- Multi-Try DE-MCz variants ---
+    "multi_try": VariantConfig(
+        name="multi_try",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="multi_try",
+        zmatrix="circular",
+        ensemble="standard",
+        tune_method="esjd",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 8},
+    ),
+    "multi_try_4": VariantConfig(
+        name="multi_try_4",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="multi_try",
+        zmatrix="circular",
+        ensemble="standard",
+        tune_method="esjd",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 4},
     ),
 }
 

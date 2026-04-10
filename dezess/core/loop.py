@@ -32,7 +32,7 @@ from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, rie
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
 # Slice modules
-from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice
+from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice, multi_try as multi_try_slice
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
@@ -74,6 +74,7 @@ SLICE_STRATEGIES = {
     "early_stop": early_stop,
     "overrelaxed": overrelaxed,
     "nurs": nurs_slice,
+    "multi_try": multi_try_slice,
 }
 
 ZMATRIX_STRATEGIES = {
@@ -297,11 +298,19 @@ def run_variant(
                     lp_x_slice = lp_i / temp
 
                 # Slice sample
-                x_new, lp_new, w_key, found, L, R = slice_mod.execute(
-                    lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
-                    n_expand=n_exp, n_shrink=n_shr,
-                    **slice_kwargs,
-                )
+                if config.slice_fn == "multi_try":
+                    x_new, lp_new, w_key, found, L, R = slice_mod.execute(
+                        lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
+                        n_expand=n_exp, n_shrink=n_shr,
+                        z_matrix=z_padded, z_count=z_count, base_mu=mu,
+                        **slice_kwargs,
+                    )
+                else:
+                    x_new, lp_new, w_key, found, L, R = slice_mod.execute(
+                        lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
+                        n_expand=n_exp, n_shrink=n_shr,
+                        **slice_kwargs,
+                    )
 
                 # Un-temper the log_prob for storage.
                 # For standard ensemble at T=1 (no snooker Jacobian), lp_new
@@ -415,6 +424,7 @@ def run_variant(
 
     # --- Block-Gibbs setup ---
     use_block_gibbs = config.ensemble == "block_gibbs"
+    use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
 
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
@@ -486,6 +496,70 @@ def run_variant(
             mean_br = jnp.mean(all_br)
             return pos_out, lps_out, k_out, mean_br
 
+        # --- Block-Gibbs MH: 1 eval per block instead of ~10 for slice ---
+        @jax.jit
+        def block_mh_step(positions, log_probs, z_padded, z_count,
+                          mu_blocks_arg, key):
+
+            def _one_block_mh(carry, block_data):
+                pos, lps, k = carry
+                block_idx, bsize, mu_b = block_data
+                b_idx = padded_blocks[block_idx]
+                mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
+
+                def _mh_walker(x_full, lp, wk):
+                    wk, k1, k2, k_accept = jax.random.split(wk, 4)
+                    idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+
+                    # DE direction in block subspace
+                    z1_block = z_padded[idx1][b_idx]
+                    z2_block = z_padded[idx2][b_idx]
+                    diff = (z1_block - z2_block) * mask
+                    norm = jnp.sqrt(jnp.sum(diff**2))
+
+                    # Scale-aware step: propose along DE direction
+                    dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
+                    mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    # Full-space direction (only block dims move)
+                    d_block = diff / jnp.maximum(norm, 1e-30)
+                    d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    d_full = d_full.at[b_idx].add(d_block * mask)
+
+                    # Single MH proposal
+                    x_prop = x_full + mu_eff * d_full
+                    lp_prop = safe_log_prob(log_prob_fn, x_prop)
+
+                    # Accept/reject (symmetric proposal)
+                    log_u = jnp.log(jax.random.uniform(
+                        k_accept, dtype=jnp.float64) + 1e-30)
+                    accept = log_u < (lp_prop - lp)
+                    x_new = jnp.where(accept, x_prop, x_full)
+                    lp_new = jnp.where(accept, lp_prop, lp)
+                    # Bracket proxy calibrated so 50% acceptance → mean_br = TARGET_RATIO
+                    # TARGET_RATIO = n_expand + 1 (captured from outer scope)
+                    target = jnp.float64(n_expand + 1)
+                    br = jnp.where(accept, 2.0 * target - 1.0, 1.0)
+                    return x_new, lp_new, wk, br
+
+                k, k_walkers = jax.random.split(k)
+                wkeys = jax.random.split(k_walkers, n_walkers)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                mean_br = jnp.mean(brs)
+                return (new_pos, new_lp, k), mean_br
+
+            k, k_perm = jax.random.split(key)
+            perm = jax.random.permutation(k_perm, n_blocks_val)
+            block_data = (perm, block_sizes_arr[perm], mu_blocks_arg[perm])
+
+            (pos_out, lps_out, k_out), all_br = jax.lax.scan(
+                _one_block_mh, (positions, log_probs, k), block_data,
+            )
+            mean_br = jnp.mean(all_br)
+            return pos_out, lps_out, k_out, mean_br
+
     # --- Initial log-probs ---
     if verbose:
         print(f"  [{config.name}] Computing initial log-probs...", flush=True)
@@ -497,12 +571,14 @@ def run_variant(
     z_log_probs = z_log_probs.at[:n_walkers].set(log_probs)
 
     # --- JIT compile ---
+    _block_step_fn = block_mh_step if use_block_mh else block_sweep_step if use_block_gibbs else None
     if use_block_gibbs:
-        # JIT compile block_sweep_step
+        # JIT compile block step
+        step_label = "block_mh_step" if use_block_mh else "block_sweep_step"
         if verbose:
-            print(f"  [{config.name}] JIT compiling block_sweep_step...", flush=True)
+            print(f"  [{config.name}] JIT compiling {step_label}...", flush=True)
         t_jit = time.time()
-        positions, log_probs, key, _ = block_sweep_step(
+        positions, log_probs, key, _ = _block_step_fn(
             positions, log_probs, z_padded, z_count, mu_blocks, key,
         )
         positions.block_until_ready()
@@ -568,7 +644,7 @@ def run_variant(
     for step in range(n_warmup):
         if use_block_gibbs:
             # Block-Gibbs warmup step
-            positions, log_probs, key, br_mean = block_sweep_step(
+            positions, log_probs, key, br_mean = _block_step_fn(
                 positions, log_probs, z_padded, z_count, mu_blocks, key,
             )
             # Fake found/br for compatibility with downstream code
@@ -866,7 +942,7 @@ def run_variant(
         else:
             # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
             if use_block_gibbs:
-                positions, log_probs, key, br_mean = block_sweep_step(
+                positions, log_probs, key, br_mean = _block_step_fn(
                     positions, log_probs, z_frozen, z_count_frozen,
                     mu_blocks, key,
                 )
