@@ -147,6 +147,50 @@ def test_local_pair():
     _run_and_check_variance(config, "local_pair_scale")
 
 
+def test_nurs():
+    """NURS: full algorithm with doubling, shift, and no-underrun stopping."""
+    config = VariantConfig(
+        name="nurs",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
+    )
+    _run_and_check_variance(config, "nurs")
+
+
+def test_nurs_deep():
+    """NURS with deeper orbit (max 32 points)."""
+    config = VariantConfig(
+        name="nurs_deep",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 5, "density_threshold": 0.001},
+    )
+    _run_and_check_variance(config, "nurs_deep")
+
+
+def test_nurs_scalar():
+    """NURS with scalar (non-scale-aware) width."""
+    config = VariantConfig(
+        name="nurs_scalar",
+        direction="de_mcz",
+        width="scalar",
+        slice_fn="nurs",
+        zmatrix="circular",
+        ensemble="standard",
+        slice_kwargs={"n_expand": 3, "density_threshold": 0.001},
+    )
+    _run_and_check_variance(config, "nurs_scalar")
+
+
 def test_original_sampler():
     """The original run_demcz_slice path must also pass."""
     init = jax.random.normal(jax.random.PRNGKey(42), (N_WALKERS, NDIM)) * 0.1
