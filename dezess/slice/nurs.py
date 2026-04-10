@@ -108,14 +108,9 @@ def execute(
         _scan_bounds, (jnp.int32(0), jnp.int32(0)), flips)
 
     # Evaluate log-prob at every lattice point in [left_final, right_final].
-    def _eval(i, lps):
-        orbit_idx = left_final + i
-        pt = x_start + jnp.float64(orbit_idx) * h * d
-        lp = safe_log_prob(log_prob_fn, pt)
-        return lps.at[i].set(lp)
-
-    all_lps = jnp.full(max_orbit, jnp.float64(-1e30))
-    all_lps = lax.fori_loop(0, max_orbit, _eval, all_lps)
+    orbit_indices = (jnp.arange(max_orbit) + left_final).astype(jnp.float64)
+    pts = x_start + orbit_indices[:, None] * h * d
+    all_lps = jax.vmap(lambda pt: safe_log_prob(log_prob_fn, pt))(pts)
 
     # Override the centre point (orbit_idx=0) with the known value.
     center_buf = -left_final              # buffer index of orbit_idx=0
