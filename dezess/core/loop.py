@@ -426,6 +426,7 @@ def run_variant(
     use_block_gibbs = config.ensemble == "block_gibbs"
     use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
     use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
+    use_block_cov = use_block_mh and ens_kwargs.get("use_block_cov", False)
 
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
@@ -862,6 +863,36 @@ def run_variant(
             print(f"  [{config.name}] Computing KDE bandwidth...", flush=True)
         kde_bandwidth = kde_direction.compute_kde_bandwidth(z_padded, z_count)
 
+    # Compute per-block Cholesky factors for covariance-adapted proposals
+    if use_block_cov and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing per-block covariance...", flush=True)
+        block_L_padded = np.zeros((n_blocks_val, max_block_size, max_block_size),
+                                  dtype=np.float64)
+        z_np = np.array(z_padded[:int(z_count)])
+        for bi, b in enumerate(blocks):
+            b_np = np.array(b)
+            bsz = len(b_np)
+            z_block = z_np[:, b_np[:bsz]]
+            if z_block.shape[0] > 2 * bsz:
+                cov_b = np.cov(z_block.T)
+                cov_b += 1e-8 * np.eye(bsz)
+                L_b = np.linalg.cholesky(cov_b)
+                block_L_padded[bi, :bsz, :bsz] = L_b
+            else:
+                block_L_padded[bi, :bsz, :bsz] = np.eye(bsz)
+        block_L_padded = jnp.array(block_L_padded, dtype=jnp.float64)
+        if verbose:
+            print(f"  [{config.name}] Block covariance ready ({n_blocks_val} blocks)", flush=True)
+    elif use_block_cov:
+        block_L_padded = jnp.zeros((n_blocks_val, max_block_size, max_block_size),
+                                    dtype=jnp.float64)
+        for bi, b in enumerate(blocks):
+            bsz = len(b)
+            block_L_padded = block_L_padded.at[bi, :bsz, :bsz].set(jnp.eye(bsz))
+    else:
+        block_L_padded = None
+
     # Adaptive budget: tune N_EXPAND/N_SHRINK and re-JIT
     needs_rejit = False
     if config.slice_fn == "adaptive_budget" and total_samples_warmup > 0:
@@ -884,6 +915,103 @@ def run_variant(
             step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
+        )
+        positions.block_until_ready()
+        if verbose:
+            print(f"  [{config.name}] Re-JIT: {time.time()-t_rejit:.1f}s", flush=True)
+
+    # Re-JIT block step if block covariance was computed
+    if use_block_cov and n_warmup > 0:
+        @jax.jit
+        def block_mh_cov_step(positions, log_probs, z_padded, z_count,
+                              mu_blocks_arg, key):
+
+            def _one_block_mh(carry, block_data):
+                pos, lps, k = carry
+                block_idx, bsize, mu_b = block_data
+                b_idx = padded_blocks[block_idx]
+                mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
+
+                def _mh_walker(x_full, lp, wk):
+                    wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
+
+                    # Covariance-adapted proposal: L @ z
+                    L_b = block_L_padded[block_idx]  # (max_block_size, max_block_size)
+                    z_rand = jax.random.normal(k1, (max_block_size,), dtype=jnp.float64)
+                    z_rand = z_rand * mask  # zero out padding dims
+                    delta = L_b @ z_rand
+                    delta = delta * mask
+                    norm = jnp.sqrt(jnp.sum(delta**2))
+                    d_block = delta / jnp.maximum(norm, 1e-30)
+
+                    dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
+                    mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    d_full = d_full.at[b_idx].add(d_block * mask)
+
+                    # Stage 1
+                    x_prop1 = x_full + mu_eff * d_full
+                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
+                    accept1 = log_u1 < (lp_prop1 - lp)
+
+                    if use_delayed_rejection:
+                        # Stage 2: smaller step, new random direction from covariance
+                        wk, k3, k_accept2 = jax.random.split(wk, 3)
+                        z_rand2 = jax.random.normal(k3, (max_block_size,), dtype=jnp.float64)
+                        z_rand2 = z_rand2 * mask
+                        delta2 = L_b @ z_rand2
+                        delta2 = delta2 * mask
+                        norm2 = jnp.sqrt(jnp.sum(delta2**2))
+                        d_block2 = delta2 / jnp.maximum(norm2, 1e-30)
+                        mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
+
+                        d_full2 = jnp.zeros(n_dim, dtype=jnp.float64)
+                        d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
+
+                        x_prop2 = x_full + mu_eff2 * d_full2
+                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
+                        accept2 = log_u2 < (lp_prop2 - lp)
+
+                        x_new = jnp.where(accept1, x_prop1,
+                                jnp.where(accept2, x_prop2, x_full))
+                        lp_new = jnp.where(accept1, lp_prop1,
+                                 jnp.where(accept2, lp_prop2, lp))
+                        either_accepted = accept1 | accept2
+                    else:
+                        x_new = jnp.where(accept1, x_prop1, x_full)
+                        lp_new = jnp.where(accept1, lp_prop1, lp)
+                        either_accepted = accept1
+
+                    target = jnp.float64(n_expand + 1)
+                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
+                    return x_new, lp_new, wk, br
+
+                k, k_walkers = jax.random.split(k)
+                wkeys = jax.random.split(k_walkers, n_walkers)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                mean_br = jnp.mean(brs)
+                return (new_pos, new_lp, k), mean_br
+
+            k, k_perm = jax.random.split(key)
+            perm = jax.random.permutation(k_perm, n_blocks_val)
+            block_data = (perm, block_sizes_arr[perm], mu_blocks_arg[perm])
+
+            (pos_out, lps_out, k_out), all_br = jax.lax.scan(
+                _one_block_mh, (positions, log_probs, k), block_data,
+            )
+            mean_br = jnp.mean(all_br)
+            return pos_out, lps_out, k_out, mean_br
+
+        _block_step_fn = block_mh_cov_step
+
+        if verbose:
+            print(f"  [{config.name}] Re-JIT compiling with block covariance...", flush=True)
+        t_rejit = time.time()
+        positions, log_probs, key, _ = _block_step_fn(
+            positions, log_probs, z_padded, z_count, mu_blocks, key,
         )
         positions.block_until_ready()
         if verbose:
