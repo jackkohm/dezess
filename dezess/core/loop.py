@@ -765,7 +765,7 @@ def run_variant(
                 n_temps=ens_kwargs.get("n_temps", 4),
             )
 
-        if verbose and ((step + 1) % 500 == 0 or step == 0):
+        if verbose:
             elapsed = time.time() - t_sample
             speed = (step + 1) / elapsed
             best = float(log_probs.max())
@@ -1275,7 +1275,7 @@ def run_variant(
 
             step_idx += 1
 
-        if verbose and (step_idx % 200 < batch_sz or step_idx >= n_production):
+        if verbose:
             elapsed = time.time() - t_prod
             speed = step_idx / elapsed if elapsed > 0 else 0
             eta = (n_production - step_idx) / speed if speed > 0 else 0
