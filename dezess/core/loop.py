@@ -32,7 +32,7 @@ from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, rie
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
 # Slice modules
-from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice
+from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice, multi_try as multi_try_slice
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
@@ -74,6 +74,7 @@ SLICE_STRATEGIES = {
     "early_stop": early_stop,
     "overrelaxed": overrelaxed,
     "nurs": nurs_slice,
+    "multi_try": multi_try_slice,
 }
 
 ZMATRIX_STRATEGIES = {
@@ -297,11 +298,19 @@ def run_variant(
                     lp_x_slice = lp_i / temp
 
                 # Slice sample
-                x_new, lp_new, w_key, found, L, R = slice_mod.execute(
-                    lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
-                    n_expand=n_exp, n_shrink=n_shr,
-                    **slice_kwargs,
-                )
+                if config.slice_fn == "multi_try":
+                    x_new, lp_new, w_key, found, L, R = slice_mod.execute(
+                        lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
+                        n_expand=n_exp, n_shrink=n_shr,
+                        z_matrix=z_padded, z_count=z_count, base_mu=mu,
+                        **slice_kwargs,
+                    )
+                else:
+                    x_new, lp_new, w_key, found, L, R = slice_mod.execute(
+                        lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
+                        n_expand=n_exp, n_shrink=n_shr,
+                        **slice_kwargs,
+                    )
 
                 # Un-temper the log_prob for storage.
                 # For standard ensemble at T=1 (no snooker Jacobian), lp_new
@@ -415,6 +424,11 @@ def run_variant(
 
     # --- Block-Gibbs setup ---
     use_block_gibbs = config.ensemble == "block_gibbs"
+    use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
+    use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
+    use_block_cov = use_block_mh and ens_kwargs.get("use_block_cov", False)
+    conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
+    use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
@@ -427,6 +441,9 @@ def run_variant(
         block_sizes_arr = jnp.array([len(b) for b in blocks], dtype=jnp.int32)
         for i, b in enumerate(blocks):
             padded_blocks = padded_blocks.at[i, :len(b)].set(b)
+
+        if use_conditional:
+            n_conditional_blocks = n_blocks_val - 1  # blocks 1..N are conditional
 
         @jax.jit
         def block_sweep_step(positions, log_probs, z_padded, z_count,
@@ -486,6 +503,97 @@ def run_variant(
             mean_br = jnp.mean(all_br)
             return pos_out, lps_out, k_out, mean_br
 
+        # --- Block-Gibbs MH: 1 eval per block instead of ~10 for slice ---
+        @jax.jit
+        def block_mh_step(positions, log_probs, z_padded, z_count,
+                          mu_blocks_arg, key):
+
+            def _one_block_mh(carry, block_data):
+                pos, lps, k = carry
+                block_idx, bsize, mu_b = block_data
+                b_idx = padded_blocks[block_idx]
+                mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
+
+                def _mh_walker(x_full, lp, wk):
+                    wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
+                    idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
+                    idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+
+                    # DE direction in block subspace
+                    z1_block = z_padded[idx1][b_idx]
+                    z2_block = z_padded[idx2][b_idx]
+                    diff = (z1_block - z2_block) * mask
+                    norm = jnp.sqrt(jnp.sum(diff**2))
+
+                    # Scale-aware step
+                    dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
+                    mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    # Full-space direction
+                    d_block = diff / jnp.maximum(norm, 1e-30)
+                    d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    d_full = d_full.at[b_idx].add(d_block * mask)
+
+                    # Stage 1: full-scale proposal
+                    x_prop1 = x_full + mu_eff * d_full
+                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
+                    accept1 = log_u1 < (lp_prop1 - lp)
+
+                    if use_delayed_rejection:
+                        # Stage 2: smaller step, new DE direction
+                        wk, k3, k4, k_accept2 = jax.random.split(wk, 4)
+                        idx3 = jax.random.randint(k3, (), 0, z_padded.shape[0]) % z_count
+                        idx4 = jax.random.randint(k4, (), 0, z_padded.shape[0]) % z_count
+                        idx4 = jnp.where(idx3 == idx4, (idx3 + 1) % z_count, idx4)
+
+                        z3_block = z_padded[idx3][b_idx]
+                        z4_block = z_padded[idx4][b_idx]
+                        diff2 = (z3_block - z4_block) * mask
+                        norm2 = jnp.sqrt(jnp.sum(diff2**2))
+                        mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
+
+                        d_block2 = diff2 / jnp.maximum(norm2, 1e-30)
+                        d_full2 = jnp.zeros(n_dim, dtype=jnp.float64)
+                        d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
+
+                        x_prop2 = x_full + mu_eff2 * d_full2
+                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
+                        accept2 = log_u2 < (lp_prop2 - lp)
+
+                        # Stage 1 wins if accepted, else stage 2, else stay
+                        x_new = jnp.where(accept1, x_prop1,
+                                jnp.where(accept2, x_prop2, x_full))
+                        lp_new = jnp.where(accept1, lp_prop1,
+                                 jnp.where(accept2, lp_prop2, lp))
+                        either_accepted = accept1 | accept2
+                    else:
+                        x_new = jnp.where(accept1, x_prop1, x_full)
+                        lp_new = jnp.where(accept1, lp_prop1, lp)
+                        either_accepted = accept1
+
+                    target = jnp.float64(n_expand + 1)
+                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
+                    return x_new, lp_new, wk, br
+
+                k, k_walkers = jax.random.split(k)
+                wkeys = jax.random.split(k_walkers, n_walkers)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                mean_br = jnp.mean(brs)
+                return (new_pos, new_lp, k), mean_br
+
+            k, k_perm = jax.random.split(key)
+            perm = jax.random.permutation(k_perm, n_blocks_val)
+            block_data = (perm, block_sizes_arr[perm], mu_blocks_arg[perm])
+
+            (pos_out, lps_out, k_out), all_br = jax.lax.scan(
+                _one_block_mh, (positions, log_probs, k), block_data,
+            )
+            mean_br = jnp.mean(all_br)
+            return pos_out, lps_out, k_out, mean_br
+
     # --- Initial log-probs ---
     if verbose:
         print(f"  [{config.name}] Computing initial log-probs...", flush=True)
@@ -497,12 +605,14 @@ def run_variant(
     z_log_probs = z_log_probs.at[:n_walkers].set(log_probs)
 
     # --- JIT compile ---
+    _block_step_fn = block_mh_step if use_block_mh else block_sweep_step if use_block_gibbs else None
     if use_block_gibbs:
-        # JIT compile block_sweep_step
+        # JIT compile block step
+        step_label = "block_mh_step" if use_block_mh else "block_sweep_step"
         if verbose:
-            print(f"  [{config.name}] JIT compiling block_sweep_step...", flush=True)
+            print(f"  [{config.name}] JIT compiling {step_label}...", flush=True)
         t_jit = time.time()
-        positions, log_probs, key, _ = block_sweep_step(
+        positions, log_probs, key, _ = _block_step_fn(
             positions, log_probs, z_padded, z_count, mu_blocks, key,
         )
         positions.block_until_ready()
@@ -568,7 +678,7 @@ def run_variant(
     for step in range(n_warmup):
         if use_block_gibbs:
             # Block-Gibbs warmup step
-            positions, log_probs, key, br_mean = block_sweep_step(
+            positions, log_probs, key, br_mean = _block_step_fn(
                 positions, log_probs, z_padded, z_count, mu_blocks, key,
             )
             # Fake found/br for compatibility with downstream code
@@ -758,6 +868,36 @@ def run_variant(
             print(f"  [{config.name}] Computing KDE bandwidth...", flush=True)
         kde_bandwidth = kde_direction.compute_kde_bandwidth(z_padded, z_count)
 
+    # Compute per-block Cholesky factors for covariance-adapted proposals
+    if use_block_cov and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing per-block covariance...", flush=True)
+        block_L_padded = np.zeros((n_blocks_val, max_block_size, max_block_size),
+                                  dtype=np.float64)
+        z_np = np.array(z_padded[:int(z_count)])
+        for bi, b in enumerate(blocks):
+            b_np = np.array(b)
+            bsz = len(b_np)
+            z_block = z_np[:, b_np[:bsz]]
+            if z_block.shape[0] > 2 * bsz:
+                cov_b = np.cov(z_block.T)
+                cov_b += 1e-8 * np.eye(bsz)
+                L_b = np.linalg.cholesky(cov_b)
+                block_L_padded[bi, :bsz, :bsz] = L_b
+            else:
+                block_L_padded[bi, :bsz, :bsz] = np.eye(bsz)
+        block_L_padded = jnp.array(block_L_padded, dtype=jnp.float64)
+        if verbose:
+            print(f"  [{config.name}] Block covariance ready ({n_blocks_val} blocks)", flush=True)
+    elif use_block_cov:
+        block_L_padded = jnp.zeros((n_blocks_val, max_block_size, max_block_size),
+                                    dtype=jnp.float64)
+        for bi, b in enumerate(blocks):
+            bsz = len(b)
+            block_L_padded = block_L_padded.at[bi, :bsz, :bsz].set(jnp.eye(bsz))
+    else:
+        block_L_padded = None
+
     # Adaptive budget: tune N_EXPAND/N_SHRINK and re-JIT
     needs_rejit = False
     if config.slice_fn == "adaptive_budget" and total_samples_warmup > 0:
@@ -784,6 +924,237 @@ def run_variant(
         positions.block_until_ready()
         if verbose:
             print(f"  [{config.name}] Re-JIT: {time.time()-t_rejit:.1f}s", flush=True)
+
+    # Re-JIT block step if block covariance was computed
+    if use_block_cov and n_warmup > 0:
+        @jax.jit
+        def block_mh_cov_step(positions, log_probs, z_padded, z_count,
+                              mu_blocks_arg, key):
+
+            def _one_block_mh(carry, block_data):
+                pos, lps, k = carry
+                block_idx, bsize, mu_b = block_data
+                b_idx = padded_blocks[block_idx]
+                mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
+
+                def _mh_walker(x_full, lp, wk):
+                    wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
+
+                    # Covariance-adapted proposal: L @ z
+                    L_b = block_L_padded[block_idx]  # (max_block_size, max_block_size)
+                    z_rand = jax.random.normal(k1, (max_block_size,), dtype=jnp.float64)
+                    z_rand = z_rand * mask  # zero out padding dims
+                    delta = L_b @ z_rand
+                    delta = delta * mask
+                    norm = jnp.sqrt(jnp.sum(delta**2))
+                    d_block = delta / jnp.maximum(norm, 1e-30)
+
+                    dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
+                    mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    d_full = d_full.at[b_idx].add(d_block * mask)
+
+                    # Stage 1
+                    x_prop1 = x_full + mu_eff * d_full
+                    lp_prop1 = safe_log_prob(log_prob_fn, x_prop1)
+                    log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
+                    accept1 = log_u1 < (lp_prop1 - lp)
+
+                    if use_delayed_rejection:
+                        # Stage 2: smaller step, new random direction from covariance
+                        wk, k3, k_accept2 = jax.random.split(wk, 3)
+                        z_rand2 = jax.random.normal(k3, (max_block_size,), dtype=jnp.float64)
+                        z_rand2 = z_rand2 * mask
+                        delta2 = L_b @ z_rand2
+                        delta2 = delta2 * mask
+                        norm2 = jnp.sqrt(jnp.sum(delta2**2))
+                        d_block2 = delta2 / jnp.maximum(norm2, 1e-30)
+                        mu_eff2 = mu_b * norm2 / jnp.maximum(dim_corr, 1e-30) / 3.0
+
+                        d_full2 = jnp.zeros(n_dim, dtype=jnp.float64)
+                        d_full2 = d_full2.at[b_idx].add(d_block2 * mask)
+
+                        x_prop2 = x_full + mu_eff2 * d_full2
+                        lp_prop2 = safe_log_prob(log_prob_fn, x_prop2)
+                        log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
+                        accept2 = log_u2 < (lp_prop2 - lp)
+
+                        x_new = jnp.where(accept1, x_prop1,
+                                jnp.where(accept2, x_prop2, x_full))
+                        lp_new = jnp.where(accept1, lp_prop1,
+                                 jnp.where(accept2, lp_prop2, lp))
+                        either_accepted = accept1 | accept2
+                    else:
+                        x_new = jnp.where(accept1, x_prop1, x_full)
+                        lp_new = jnp.where(accept1, lp_prop1, lp)
+                        either_accepted = accept1
+
+                    target = jnp.float64(n_expand + 1)
+                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
+                    return x_new, lp_new, wk, br
+
+                k, k_walkers = jax.random.split(k)
+                wkeys = jax.random.split(k_walkers, n_walkers)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                mean_br = jnp.mean(brs)
+                return (new_pos, new_lp, k), mean_br
+
+            k, k_perm = jax.random.split(key)
+            perm = jax.random.permutation(k_perm, n_blocks_val)
+            block_data = (perm, block_sizes_arr[perm], mu_blocks_arg[perm])
+
+            (pos_out, lps_out, k_out), all_br = jax.lax.scan(
+                _one_block_mh, (positions, log_probs, k), block_data,
+            )
+            mean_br = jnp.mean(all_br)
+            return pos_out, lps_out, k_out, mean_br
+
+        _block_step_fn = block_mh_cov_step
+
+        if verbose:
+            print(f"  [{config.name}] Re-JIT compiling with block covariance...", flush=True)
+        t_rejit = time.time()
+        positions, log_probs, key, _ = _block_step_fn(
+            positions, log_probs, z_padded, z_count, mu_blocks, key,
+        )
+        positions.block_until_ready()
+        if verbose:
+            print(f"  [{config.name}] Re-JIT: {time.time()-t_rejit:.1f}s", flush=True)
+
+    if use_conditional:
+        @jax.jit
+        def block_conditional_step(positions, log_probs, z_padded, z_count,
+                                   mu_blocks_arg, key):
+            # ---- Round 1: Update potential block (block 0) with full_log_prob ----
+            pot_b_idx = padded_blocks[0]
+            pot_bsize = block_sizes_arr[0]
+            pot_mu = mu_blocks_arg[0]
+            pot_mask = (jnp.arange(max_block_size) < pot_bsize).astype(jnp.float64)
+
+            def _mh_pot_walker(x_full, lp, wk):
+                wk, k1, k2, k_accept = jax.random.split(wk, 4)
+                idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
+                idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
+                idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+
+                z1_b = z_padded[idx1][pot_b_idx]
+                z2_b = z_padded[idx2][pot_b_idx]
+                diff = (z1_b - z2_b) * pot_mask
+                norm = jnp.sqrt(jnp.sum(diff**2))
+                dim_corr = jnp.sqrt(jnp.float64(pot_bsize) / 2.0)
+                mu_eff = pot_mu * norm / jnp.maximum(dim_corr, 1e-30)
+
+                d_block = diff / jnp.maximum(norm, 1e-30)
+                d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                d_full = d_full.at[pot_b_idx].add(d_block * pot_mask)
+
+                x_prop = x_full + mu_eff * d_full
+                lp_prop = safe_log_prob(log_prob_fn, x_prop)
+                log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
+                accept = log_u < (lp_prop - lp)
+                x_new = jnp.where(accept, x_prop, x_full)
+                lp_new = jnp.where(accept, lp_prop, lp)
+                return x_new, lp_new, wk
+
+            key, k_pot = jax.random.split(key)
+            pot_keys = jax.random.split(k_pot, n_walkers)
+            positions, log_probs, _ = jax.vmap(_mh_pot_walker)(
+                positions, log_probs, pot_keys)
+
+            # ---- Round 2: Update all stream blocks in parallel ----
+            cond_block_indices = jnp.arange(n_conditional_blocks, dtype=jnp.int32)
+            cond_bsizes = block_sizes_arr[1:]         # (n_cond,)
+            cond_mus = mu_blocks_arg[1:]               # (n_cond,)
+            cond_b_idxs = padded_blocks[1:]            # (n_cond, max_block_size)
+
+            def _mh_one_stream(x_full, wk, stream_idx):
+                """MH update for one stream block. Returns proposed position and accept flag."""
+                wk, k1, k2, k_accept = jax.random.split(wk, 4)
+                s_b_idx = cond_b_idxs[stream_idx]
+                s_bsize = cond_bsizes[stream_idx]
+                s_mu = cond_mus[stream_idx]
+                s_mask = (jnp.arange(max_block_size) < s_bsize).astype(jnp.float64)
+
+                idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
+                idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
+                idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
+
+                z1_b = z_padded[idx1][s_b_idx]
+                z2_b = z_padded[idx2][s_b_idx]
+                diff = (z1_b - z2_b) * s_mask
+                norm = jnp.sqrt(jnp.sum(diff**2))
+                dim_corr = jnp.sqrt(jnp.float64(s_bsize) / 2.0)
+                mu_eff = s_mu * norm / jnp.maximum(dim_corr, 1e-30)
+
+                d_block = diff / jnp.maximum(norm, 1e-30)
+                d_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                d_full = d_full.at[s_b_idx].add(d_block * s_mask)
+
+                x_prop = x_full + mu_eff * d_full
+
+                # Conditional log_prob for MH ratio
+                cond_lp_old = conditional_log_prob_fn(x_full, stream_idx)
+                cond_lp_new = conditional_log_prob_fn(x_prop, stream_idx)
+
+                log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
+                accept = log_u < (cond_lp_new - cond_lp_old)
+                return x_prop, accept
+
+            def _update_all_streams_one_walker(x_full, wk):
+                """Update all stream blocks for one walker, return merged position."""
+                wk_streams = jax.random.split(wk, n_conditional_blocks)
+
+                # vmap over stream indices: propose for each stream independently
+                x_proposals, accepts = jax.vmap(
+                    lambda wk_s, s_idx: _mh_one_stream(x_full, wk_s, s_idx),
+                    in_axes=(0, 0)
+                )(wk_streams, cond_block_indices)
+                # x_proposals: (n_cond, ndim), accepts: (n_cond,)
+
+                # Merge accepted blocks back into x_full
+                def _merge_one_stream(carry, stream_data):
+                    x_merged = carry
+                    s_idx, x_prop_s, accepted_s = stream_data
+                    s_b_idx_s = cond_b_idxs[s_idx]
+                    s_bsize_s = cond_bsizes[s_idx]
+                    s_mask_s = (jnp.arange(max_block_size) < s_bsize_s).astype(jnp.float64)
+
+                    proposed_block = x_prop_s[s_b_idx_s]
+                    current_block = x_merged[s_b_idx_s]
+                    new_block = jnp.where(accepted_s, proposed_block, current_block)
+                    # Only overwrite valid indices (mask out padding)
+                    final_block = new_block * s_mask_s + x_merged[s_b_idx_s] * (1.0 - s_mask_s)
+                    x_merged = x_merged.at[s_b_idx_s].set(final_block)
+                    return x_merged, None
+
+                x_merged, _ = jax.lax.scan(
+                    _merge_one_stream, x_full,
+                    (cond_block_indices, x_proposals, accepts),
+                )
+                return x_merged
+
+            key, k_streams = jax.random.split(key)
+            stream_keys = jax.random.split(k_streams, n_walkers)
+            positions = jax.vmap(_update_all_streams_one_walker)(positions, stream_keys)
+
+            # ---- Round 3: Re-evaluate full log_prob for consistency ----
+            log_probs = jax.vmap(lambda x: safe_log_prob(log_prob_fn, x))(positions)
+
+            mean_br = jnp.float64(n_expand + 1)  # neutral bracket ratio
+            return positions, log_probs, key, mean_br
+
+        _block_step_fn = block_conditional_step
+
+        if verbose:
+            print(f"  [{config.name}] JIT compiling conditional step...", flush=True)
+        t_rejit = time.time()
+        positions, log_probs, key, _ = _block_step_fn(
+            positions, log_probs, z_padded, z_count, mu_blocks, key,
+        )
+        positions.block_until_ready()
+        if verbose:
+            print(f"  [{config.name}] Conditional JIT: {time.time()-t_rejit:.1f}s", flush=True)
 
     # --- Production (Z-matrix frozen) ---
     n_production = n_steps - n_warmup
@@ -866,7 +1237,7 @@ def run_variant(
         else:
             # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
             if use_block_gibbs:
-                positions, log_probs, key, br_mean = block_sweep_step(
+                positions, log_probs, key, br_mean = _block_step_fn(
                     positions, log_probs, z_frozen, z_count_frozen,
                     mu_blocks, key,
                 )
