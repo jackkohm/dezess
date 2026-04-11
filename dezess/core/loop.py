@@ -27,7 +27,7 @@ from dezess.diagnostics import StreamingDiagnostics
 from dezess.transforms import Transform, identity
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction, global_move
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -57,6 +57,7 @@ DIRECTION_STRATEGIES = {
     "coordinate": coordinate,
     "local_pair": local_pair,
     "kde": kde_direction,
+    "global_move": global_move,
 }
 
 WIDTH_STRATEGIES = {
@@ -869,6 +870,25 @@ def run_variant(
             print(f"  [{config.name}] Computing KDE bandwidth...", flush=True)
         kde_bandwidth = kde_direction.compute_kde_bandwidth(z_padded, z_count)
 
+    # Fit GMM if using global_move directions
+    if config.direction == "global_move" and n_warmup > 0:
+        from dezess.directions.gmm import fit_gmm
+        n_comp = dir_kwargs.get("n_components", 2)
+        if verbose:
+            print(f"  [{config.name}] Fitting GMM ({n_comp} components)...", flush=True)
+        key, k_gmm = jax.random.split(key)
+        gmm_means, gmm_covs, gmm_weights, gmm_chols = fit_gmm(
+            z_padded, z_count, n_components=n_comp,
+            n_iter=dir_kwargs.get("gmm_n_iter", 100),
+            key=k_gmm,
+        )
+        dir_kwargs["gmm_means"] = gmm_means
+        dir_kwargs["gmm_covs"] = gmm_covs
+        dir_kwargs["gmm_weights"] = gmm_weights
+        dir_kwargs["gmm_chols"] = gmm_chols
+        if verbose:
+            print(f"  [{config.name}] GMM fitted: weights={np.array(gmm_weights).round(3)}", flush=True)
+
     # Compute per-block Cholesky factors for covariance-adapted proposals
     if use_block_cov and n_warmup > 0:
         if verbose:
@@ -911,7 +931,7 @@ def run_variant(
 
     # Re-JIT if budget changed or PCA/flow directions updated
     # (skip for block-Gibbs which uses its own JIT-compiled step)
-    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde")):
+    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move")):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
