@@ -503,6 +503,29 @@ VARIANTS = {
         width_kwargs={"scale_factor": 1.0},
         slice_kwargs={"n_expand": 4},
     ),
+
+    # --- Adaptive slice + Global move variants ---
+    "adaptive_slice": VariantConfig(
+        name="adaptive_slice",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="adaptive",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        slice_kwargs={"n_expand": 50, "n_shrink": 50},
+    ),
+    "global_move": VariantConfig(
+        name="global_move",
+        direction="global_move",
+        width="scale_aware",
+        slice_fn="adaptive",
+        zmatrix="circular",
+        ensemble="standard",
+        width_kwargs={"scale_factor": 1.0},
+        direction_kwargs={"n_components": 2, "global_prob": 0.1},
+        slice_kwargs={"n_expand": 50, "n_shrink": 50},
+    ),
 }
 
 
