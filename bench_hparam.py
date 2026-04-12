@@ -109,7 +109,8 @@ for name, target in TARGETS:
         ess_per_eval = ess / total_evals if total_evals > 0 else 0.0
 
         metric_values.append(ess_per_eval)
-        print(f"  {name}: ESS={ess:.1f}, ESS/eval={ess_per_eval:.6f}, wall={wall:.2f}s")
+        rhat = float(streaming.get("rhat_max", float("nan")))
+        print(f"  {name}: ESS={ess:.1f}, R-hat={rhat:.4f}, ESS/eval={ess_per_eval:.6f}, wall={wall:.2f}s")
 
     except Exception as e:
         print(f"  {name}: FAILED — {e}")
