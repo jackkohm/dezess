@@ -43,3 +43,4 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 41	128	de_mcz	scale_aware	mh_multi	1	1	1	0.011712	-0.000494	discard	scale_factor=6.0 worse than 5.0
 42	128	de_mcz	scale_aware	mh_multi	1	1	1	0.012592	+0.000386	keep	scale_factor=4.0 NEW BEST
 43	128	de_mcz	scale_aware	mh_multi	1	1	1	0.012009	-0.000583	discard	scale_factor=3.5 worse than 4.0
+44	128	de_mcz	scale_aware	mh_multi	1	1	1	0.012403	-0.000189	discard	scale_factor=4.5 worse than 4.0
