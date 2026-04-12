@@ -7,6 +7,6 @@
   "direction_kwargs": {},
   "width": "scale_aware",
   "width_kwargs": {"scale_factor": 1.0},
-  "slice_fn": "fixed",
-  "slice_kwargs": {}
+  "slice_fn": "nurs",
+  "slice_kwargs": {"density_threshold": 0.001}
 }

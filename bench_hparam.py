@@ -71,9 +71,13 @@ TARGETS = [
 N_SAMPLES = 2000
 N_WARMUP  = 1500
 
-# Evals per walker per step (fixed slice: 2*n_expand + n_shrink, times n_slices)
-# For other strategies we use this as an approximation too.
-evals_per_step = n_slices * (2 * n_expand + n_shrink)
+# Evals per walker per step (times n_slices for multi-direction)
+# fixed/early_stop: 2*n_expand (expand checks both L+R) + n_shrink (shrink proposals)
+# nurs:             2^n_expand + 1  (orbit of size 2^n_expand + 1 shift-proposal eval)
+if slice_fn == "nurs":
+    evals_per_step = n_slices * (2 ** n_expand + 1)
+else:
+    evals_per_step = n_slices * (2 * n_expand + n_shrink)
 
 metric_values = []
 
