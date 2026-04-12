@@ -106,10 +106,16 @@ for name, target in TARGETS:
         wall = float(result["wall_time"])
 
         total_evals = n_walkers * N_SAMPLES * evals_per_step
+        rhat = float(streaming.get("rhat_max", float("inf")))
         ess_per_eval = ess / total_evals if total_evals > 0 else 0.0
 
-        metric_values.append(ess_per_eval)
-        print(f"  {name}: ESS={ess:.1f}, ESS/eval={ess_per_eval:.6f}, wall={wall:.2f}s")
+        # Guard: R-hat > 1.1 means chains not converged — penalise to zero
+        if rhat > 1.1:
+            print(f"  {name}: ESS={ess:.1f}, R-hat={rhat:.4f} FAIL, ESS/eval=0 (not converged)")
+            metric_values.append(0.0)
+        else:
+            metric_values.append(ess_per_eval)
+            print(f"  {name}: ESS={ess:.1f}, R-hat={rhat:.4f}, ESS/eval={ess_per_eval:.6f}, wall={wall:.2f}s")
 
     except Exception as e:
         print(f"  {name}: FAILED — {e}")
