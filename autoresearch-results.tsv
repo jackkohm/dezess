@@ -5,3 +5,4 @@ iteration	n_walkers	n_expand	n_shrink	ess_per_sec	delta	decision	note
 3	64	2	6	582.4932	+146.89	keep	new best
 4	32	2	6	273.1733	-162.43	discard	fewer walkers killed Z-matrix diversity
 5	128	2	6	902.5965	+466.99	keep	new best — ESS scales superlinearly with walkers
+6	256	2	6	1654.3909	+1218.79	keep	new best — superlinear scaling continues
