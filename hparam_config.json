@@ -1,6 +1,6 @@
 {
   "n_walkers": 256,
-  "n_expand": 1,
+  "n_expand": 2,
   "n_shrink": 1,
   "n_slices_per_step": 1,
   "direction": "de_mcz",
