@@ -1,10 +1,2 @@
-iteration	n_walkers	n_expand	n_shrink	ess_per_sec	delta	decision	note
-0	64	3	12	435.6009	baseline	keep	baseline
-1	64	3	8	508.1248	+72.52	keep	new best
-2	64	3	6	556.5875	+120.99	keep	new best
-3	64	2	6	582.4932	+146.89	keep	new best
-4	32	2	6	273.1733	-162.43	discard	fewer walkers killed Z-matrix diversity
-5	128	2	6	902.5965	+466.99	keep	new best — ESS scales superlinearly with walkers
-6	256	2	6	1654.3909	+1218.79	keep	new best — superlinear scaling continues
-7	512	2	6	2789.5072	+2353.91	keep	new best — still no saturation
-8	512	1	4	2430.2715	-359.23	discard	too lean — bracket quality degraded
+iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	delta	decision	note
+0	64	de_mcz	scale_aware	fixed	3	12	1	0.000473	baseline	keep	baseline — ESS/eval on ill_cond_60+funnel_30+corr_60

@@ -2,8 +2,11 @@
   "n_walkers": 64,
   "n_expand": 3,
   "n_shrink": 12,
+  "n_slices_per_step": 1,
   "direction": "de_mcz",
+  "direction_kwargs": {},
   "width": "scale_aware",
-  "width_scale_factor": 1.0,
-  "direction_kwargs": {}
+  "width_kwargs": {"scale_factor": 1.0},
+  "slice_fn": "fixed",
+  "slice_kwargs": {}
 }

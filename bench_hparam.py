@@ -1,9 +1,15 @@
-"""Hyperparameter benchmark: measures mean ESS/sec across three challenging targets.
+"""Hyperparameter benchmark: measures ESS per total log-prob eval.
 
-Reads n_walkers, n_expand, n_shrink from hparam_config.json.
-Outputs 'METRIC: <float>' as last line — used by autoresearch verify command.
+Metric = ESS_min / (n_walkers * N_SAMPLES * evals_per_step)
 
-Targets: ill_conditioned_30, funnel_10, correlated_30
+This is pure sampler efficiency: information gained per likelihood call,
+independent of parallelism. n_walkers appears in the denominator so adding
+walkers only wins if ESS scales proportionally.
+
+Targets: ill_conditioned_60, funnel_30, correlated_60
+(high-dimensional, hard — tests regime where n_walkers << n_dim)
+
+Outputs 'METRIC: <float>' as last line for autoresearch verify command.
 """
 import json
 import sys
@@ -21,56 +27,85 @@ from dezess.targets import ill_conditioned_gaussian, neals_funnel, correlated_ga
 with open("hparam_config.json") as f:
     cfg = json.load(f)
 
-n_walkers = int(cfg["n_walkers"])
-n_expand  = int(cfg["n_expand"])
-n_shrink  = int(cfg["n_shrink"])
+n_walkers       = int(cfg["n_walkers"])
+n_expand        = int(cfg["n_expand"])
+n_shrink        = int(cfg["n_shrink"])
+n_slices        = int(cfg.get("n_slices_per_step", 1))
+direction       = cfg.get("direction", "de_mcz")
+direction_kwargs = cfg.get("direction_kwargs", {})
+width           = cfg.get("width", "scale_aware")
+width_kwargs    = cfg.get("width_kwargs", {"scale_factor": 1.0})
+slice_fn        = cfg.get("slice_fn", "fixed")
+slice_kwargs    = cfg.get("slice_kwargs", {})
 
-print(f"Config: n_walkers={n_walkers}, n_expand={n_expand}, n_shrink={n_shrink}")
+# Inject n_expand/n_shrink into slice_kwargs so they're respected
+if slice_fn == "fixed":
+    slice_kwargs = dict(slice_kwargs)
+    slice_kwargs.setdefault("n_expand", n_expand)
+    slice_kwargs.setdefault("n_shrink", n_shrink)
+
+print(f"Config: n_walkers={n_walkers}, direction={direction}, width={width}, "
+      f"slice={slice_fn}, n_expand={n_expand}, n_shrink={n_shrink}, "
+      f"n_slices={n_slices}")
 
 config = VariantConfig(
-    name="scale_aware_tuned",
-    direction="de_mcz",
-    width="scale_aware",
-    slice_fn="fixed",
+    name="autoresearch_candidate",
+    direction=direction,
+    width=width,
+    slice_fn=slice_fn,
     zmatrix="circular",
     ensemble="standard",
-    width_kwargs={"scale_factor": 1.0},
-    slice_kwargs={"n_expand": n_expand, "n_shrink": n_shrink},
+    n_slices_per_step=n_slices,
+    direction_kwargs=direction_kwargs,
+    width_kwargs=width_kwargs,
+    slice_kwargs=slice_kwargs,
 )
 
+# Hard targets: high-dimensional, n_walkers << n_dim
 TARGETS = [
-    ("ill_conditioned_30", ill_conditioned_gaussian(30)),
-    ("funnel_10",          neals_funnel(10)),
-    ("correlated_30",      correlated_gaussian(30)),
+    ("ill_conditioned_60", ill_conditioned_gaussian(60, condition=1000.0)),
+    ("funnel_30",          neals_funnel(30)),
+    ("correlated_60",      correlated_gaussian(60)),
 ]
 
-N_SAMPLES = 1500
-N_WARMUP  = 800
+N_SAMPLES = 2000
+N_WARMUP  = 1500
 
-ess_per_sec_list = []
+# Evals per walker per step (fixed slice: 2*n_expand + n_shrink, times n_slices)
+# For other strategies we use this as an approximation too.
+evals_per_step = n_slices * (2 * n_expand + n_shrink)
+
+metric_values = []
 
 for name, target in TARGETS:
     init = target.sample(jax.random.PRNGKey(42), n_walkers)
 
-    result = run_variant(
-        target.log_prob,
-        init,
-        n_steps=N_SAMPLES + N_WARMUP,
-        config=config,
-        n_warmup=N_WARMUP,
-        key=jax.random.PRNGKey(0),
-        mu=1.0,
-        tune=True,
-        verbose=False,
-    )
+    try:
+        result = run_variant(
+            target.log_prob,
+            init,
+            n_steps=N_SAMPLES + N_WARMUP,
+            config=config,
+            n_warmup=N_WARMUP,
+            key=jax.random.PRNGKey(0),
+            mu=1.0,
+            tune=True,
+            verbose=False,
+        )
 
-    streaming = result["diagnostics"].get("streaming", {})
-    ess  = float(streaming.get("ess_min", 0.0))
-    wall = float(result["wall_time"])
-    ess_s = ess / wall if wall > 0 else 0.0
+        streaming = result["diagnostics"].get("streaming", {})
+        ess  = float(streaming.get("ess_min", 0.0))
+        wall = float(result["wall_time"])
 
-    ess_per_sec_list.append(ess_s)
-    print(f"  {name}: ESS={ess:.1f}, wall={wall:.2f}s, ESS/s={ess_s:.2f}")
+        total_evals = n_walkers * N_SAMPLES * evals_per_step
+        ess_per_eval = ess / total_evals if total_evals > 0 else 0.0
 
-mean_ess_per_sec = sum(ess_per_sec_list) / len(ess_per_sec_list)
-print(f"METRIC: {mean_ess_per_sec:.4f}")
+        metric_values.append(ess_per_eval)
+        print(f"  {name}: ESS={ess:.1f}, ESS/eval={ess_per_eval:.6f}, wall={wall:.2f}s")
+
+    except Exception as e:
+        print(f"  {name}: FAILED — {e}")
+        metric_values.append(0.0)
+
+mean_metric = sum(metric_values) / len(metric_values) if metric_values else 0.0
+print(f"METRIC: {mean_metric:.6f}")
