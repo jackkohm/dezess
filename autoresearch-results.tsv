@@ -1,0 +1,2 @@
+iteration	n_walkers	n_expand	n_shrink	ess_per_sec	delta	decision	note
+0	64	3	12	435.6009	baseline	keep	baseline
