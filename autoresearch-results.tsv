@@ -41,3 +41,4 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 39	128	de_mcz	scale_aware	mh_multi	1	1	1	0.010798	-0.001408	discard	scale_factor=7.0 worse than 5.0
 40	128	de_mcz	scale_aware	mh_adaptive	1	1	1	0.011507	-0.000699	discard	full-cov MH 2.38/sqrt(d): worse on hard targets
 41	128	de_mcz	scale_aware	mh_multi	1	1	1	0.011712	-0.000494	discard	scale_factor=6.0 worse than 5.0
+42	128	de_mcz	scale_aware	mh_multi	1	1	1	0.012592	+0.000386	keep	scale_factor=4.0 NEW BEST
