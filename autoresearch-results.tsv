@@ -1,2 +1,25 @@
 iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	delta	decision	note
 0	64	de_mcz	scale_aware	fixed	3	12	1	0.000473	baseline	keep	baseline — ESS/eval on ill_cond_60+funnel_30+corr_60
+1	64	de_mcz	scale_aware	fixed	3	6	1	0.000736	+0.000263	keep	fewer shrink evals
+2	64	de_mcz	scale_aware	fixed	2	4	1	0.001075	+0.000602	keep	leaner expand+shrink
+3	64	de_mcz	scale_aware	fixed	1	3	1	0.001443	+0.000970	keep	minimum practical budget
+4	64	de_mcz	scale_aware	fixed	1	3	3	0.001006	-0.000437	discard	n_slices=3 not worth 3x evals
+5	128	whitened	scale_aware	fixed	1	3	1	0.001190	-0.000253	discard	whitened worse than de_mcz at 64W/60D
+6	128	de_mcz	scale_aware	fixed	1	3	1	0.001454	+0.000011	keep	n_walkers=128 marginal winner
+7	256	de_mcz	scale_aware	fixed	1	3	1	0.001440	-0.000014	discard	256 walkers sublinear ESS
+8	128	pca	scale_aware	fixed	1	3	1	0.001401	-0.000053	discard	pca hurts funnel
+9	128	de_mcz	scale_aware	fixed	1	2	1	0.001673	+0.000219	keep	n_shrink=2 new best
+10	128	de_mcz	scale_aware	fixed	1	1	1	0.001926	+0.000472	keep	n_shrink=1 new best
+11	128	de_mcz	scale_aware	nurs	1	1	1	0.002226	+0.000772	keep	NURS density-proportional sampling
+12	128	de_mcz	scale_aware	nurs	2	1	1	0.001336	-0.000890	discard	NURS n_expand=2 not worth 5 evals
+13	64	de_mcz	scale_aware	nurs	1	1	1	0.002208	-0.000018	discard	64 walkers marginal worse
+14	128	de_mcz	scale_aware	nurs	0	1	1	0.003339	+0.001113	keep	NURS n_expand=0 pure MH shift 2 evals
+15	128	de_mcz	scale_aware	mh	1	1	1	0.005098	+0.001759	keep	NEW: mh slice 1 eval/step
+16	256	de_mcz	scale_aware	mh	1	1	1	0.005106	+0.000008	keep	256 walkers marginal winner with mh
+17	256	snooker	scale_aware	mh	1	1	1	0.005037	-0.000069	discard	snooker no Jacobian correction in MH
+18	256	de_mcz	scale_aware	mh	1	1	1	0.005196	+0.000090	keep	scale_factor=2.0
+19	256	de_mcz	scale_aware	mh	1	1	1	0.005345	+0.000149	keep	scale_factor=3.0 new best
+20	256	de_mcz	scale_aware	mh	1	1	1	0.005315	-0.000030	discard	scale_factor=5.0 too wide
+21	256	de_mcz	scale_aware	mh	1	1	1	0.005124	-0.000221	discard	Gaussian proposal worse than uniform
+22	256	de_mcz	scale_aware	mh_multi	1	1	1	0.006314	+0.000969	keep	NEW: mh_multi k=1 massive jump
+23	256	de_mcz	scale_aware	mh_multi	2	1	1	0.003157	-0.003157	discard	k=2 doubles evals, same ESS
