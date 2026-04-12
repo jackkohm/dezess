@@ -2,3 +2,4 @@ iteration	n_walkers	n_expand	n_shrink	ess_per_sec	delta	decision	note
 0	64	3	12	435.6009	baseline	keep	baseline
 1	64	3	8	508.1248	+72.52	keep	new best
 2	64	3	6	556.5875	+120.99	keep	new best
+3	64	2	6	582.4932	+146.89	keep	new best
