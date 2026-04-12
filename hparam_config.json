@@ -1,5 +1,5 @@
 {
-  "n_walkers": 128,
+  "n_walkers": 256,
   "n_expand": 2,
   "n_shrink": 6
 }
