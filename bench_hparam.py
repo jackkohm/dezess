@@ -83,6 +83,8 @@ elif slice_fn == "mh":
     evals_per_step = n_slices * 1       # exactly 1 eval per MH step
 elif slice_fn == "mh_multi":
     evals_per_step = n_slices * n_expand  # k=n_expand proposals evaluated
+elif slice_fn == "mh_adaptive":
+    evals_per_step = n_slices * 1  # 1 eval per full-covariance MH step
 else:
     evals_per_step = n_slices * (2 * n_expand + n_shrink)
 

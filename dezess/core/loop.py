@@ -35,6 +35,7 @@ from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_ga
 from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice, multi_try as multi_try_slice, adaptive as adaptive_slice
 from dezess.slice import mh as mh_slice
 from dezess.slice import mh_multi as mh_multi_slice
+from dezess.slice import mh_adaptive as mh_adaptive_slice
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
@@ -81,6 +82,7 @@ SLICE_STRATEGIES = {
     "adaptive": adaptive_slice,
     "mh": mh_slice,
     "mh_multi": mh_multi_slice,
+    "mh_adaptive": mh_adaptive_slice,
 }
 
 ZMATRIX_STRATEGIES = {
@@ -227,6 +229,9 @@ def run_variant(
     # Whitening matrix: pre-initialize with identity (updated after warmup)
     whitening_matrix = jnp.eye(n_dim, dtype=jnp.float64)
 
+    # Covariance Cholesky: pre-initialize with identity (updated after warmup for mh_adaptive)
+    cov_chol = jnp.eye(n_dim, dtype=jnp.float64)
+
     # KDE bandwidth: pre-initialize with ones (updated after warmup)
     kde_bandwidth = jnp.ones(n_dim, dtype=jnp.float64)
 
@@ -242,7 +247,8 @@ def run_variant(
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
-                          flow_directions, whitening_matrix, kde_bandwidth):
+                          flow_directions, whitening_matrix, kde_bandwidth,
+                          cov_chol):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
@@ -312,6 +318,13 @@ def run_variant(
                         lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
                         n_expand=n_exp, n_shrink=n_shr,
                         z_matrix=z_padded, z_count=z_count, base_mu=mu,
+                        **slice_kwargs,
+                    )
+                elif config.slice_fn == "mh_adaptive":
+                    x_new, lp_new, w_key, found, L, R = slice_mod.execute(
+                        lp_fn, x_i, d, lp_x_slice, mu_eff, w_key,
+                        n_expand=n_exp, n_shrink=n_shr,
+                        cov_chol=cov_chol,
                         **slice_kwargs,
                     )
                 else:
@@ -420,12 +433,13 @@ def run_variant(
     def _call_step(step_fn, positions, log_probs, z_padded, z_count, z_log_probs,
                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                    walker_aux_ds, temperatures):
-        """Helper to call step_fn with all required args including PCA/flow/whitening."""
+        """Helper to call step_fn with all required args including PCA/flow/whitening/cov."""
         return step_fn(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
             pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+            cov_chol,
         )
 
     # --- Block-Gibbs setup ---
@@ -868,6 +882,15 @@ def run_variant(
             print(f"  [{config.name}] Computing whitening matrix...", flush=True)
         whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
 
+    # Compute empirical covariance Cholesky if using mh_adaptive
+    if config.slice_fn == "mh_adaptive" and n_warmup > 0:
+        if verbose:
+            print(f"  [{config.name}] Computing empirical covariance Cholesky...", flush=True)
+        cov_chol = mh_adaptive_slice.compute_cov_chol(z_padded, z_count)
+        if verbose:
+            diag_std = float(jnp.sqrt(jnp.diag(cov_chol @ cov_chol.T).mean()))
+            print(f"  [{config.name}] cov_chol ready: mean_std={diag_std:.3f}", flush=True)
+
     # Compute KDE bandwidth if using KDE directions
     if config.direction == "kde" and n_warmup > 0:
         if verbose:
@@ -935,7 +958,7 @@ def run_variant(
 
     # Re-JIT if budget changed or PCA/flow directions updated
     # (skip for block-Gibbs which uses its own JIT-compiled step)
-    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move")):
+    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move") or config.slice_fn == "mh_adaptive"):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
@@ -1217,6 +1240,7 @@ def run_variant(
                 pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, k, pd, bw, da, ds, temperatures,
                 pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                cov_chol,
             )
             return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
@@ -1275,6 +1299,7 @@ def run_variant(
                     mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                     walker_aux_ds, temperatures,
                     pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                    cov_chol,
                 )
             if config.ensemble == "parallel_tempering":
                 key, k_swap = jax.random.split(key)
