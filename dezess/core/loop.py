@@ -31,6 +31,7 @@ from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, rie
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
+from dezess.width import cov_aware as cov_aware_width
 # Slice modules
 from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice, multi_try as multi_try_slice, adaptive as adaptive_slice
 from dezess.slice import mh as mh_slice
@@ -69,6 +70,7 @@ WIDTH_STRATEGIES = {
     "per_direction": per_direction,
     "scale_aware": scale_aware_width,
     "zeus_gamma": zeus_gamma_width,
+    "cov_aware": cov_aware_width,
 }
 
 SLICE_STRATEGIES = {
@@ -291,7 +293,11 @@ def run_variant(
 
                 # Width
                 w_key, k_width = jax.random.split(w_key)
-                mu_eff = width_mod.get_mu(mu, d, w_aux, key=k_width, **width_kwargs)
+                if config.width == "cov_aware":
+                    mu_eff = width_mod.get_mu(mu, d, w_aux, key=k_width,
+                                              cov_chol=cov_chol, **width_kwargs)
+                else:
+                    mu_eff = width_mod.get_mu(mu, d, w_aux, key=k_width, **width_kwargs)
 
                 # Build slice log-density.
                 # For snooker: include Jacobian |x - anchor|^{d-1} so
@@ -882,8 +888,8 @@ def run_variant(
             print(f"  [{config.name}] Computing whitening matrix...", flush=True)
         whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
 
-    # Compute empirical covariance Cholesky if using mh_adaptive
-    if config.slice_fn == "mh_adaptive" and n_warmup > 0:
+    # Compute empirical covariance Cholesky if using mh_adaptive or cov_aware width
+    if (config.slice_fn == "mh_adaptive" or config.width == "cov_aware") and n_warmup > 0:
         if verbose:
             print(f"  [{config.name}] Computing empirical covariance Cholesky...", flush=True)
         cov_chol = mh_adaptive_slice.compute_cov_chol(z_padded, z_count)
@@ -958,7 +964,7 @@ def run_variant(
 
     # Re-JIT if budget changed or PCA/flow directions updated
     # (skip for block-Gibbs which uses its own JIT-compiled step)
-    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move") or config.slice_fn == "mh_adaptive"):
+    if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move") or config.slice_fn == "mh_adaptive" or config.width == "cov_aware"):
         step_fn = _make_step_fn(n_expand, n_shrink)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
