@@ -52,18 +52,16 @@ def execute(
     """
     key, k_prop, k_accept = jax.random.split(key, 3)
 
-    # Gaussian proposal N(0, mu^2) along direction d.
-    # Symmetric proposal cancels from MH ratio (standard random-walk MH).
-    # Optimal acceptance for 1-D Gaussian MH ≈ 44% (Roberts & Rosenthal 1998).
-    t = jax.random.normal(k_prop, dtype=jnp.float64) * mu
+    # Uniform proposal in [-mu/2, mu/2] along direction d
+    t = (jax.random.uniform(k_prop, dtype=jnp.float64) - 0.5) * mu
     x_prop = x + t * d
     lp_prop = safe_log_prob(log_prob_fn, x_prop)
 
-    # Metropolis accept/reject (proposal is symmetric → no Hastings correction)
+    # Metropolis accept/reject
     log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
     accept = log_u < (lp_prop - lp_x)
 
     x_new  = jnp.where(accept, x_prop, x)
     lp_new = jnp.where(accept, lp_prop, lp_x)
 
-    return x_new, lp_new, key, accept, -mu * jnp.float64(2.0), mu * jnp.float64(2.0)
+    return x_new, lp_new, key, accept, -mu * jnp.float64(0.5), mu * jnp.float64(0.5)
