@@ -1,5 +1,5 @@
 {
-  "n_walkers": 64,
+  "n_walkers": 128,
   "n_expand": 1,
   "n_shrink": 3,
   "n_slices_per_step": 1,
