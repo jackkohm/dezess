@@ -78,6 +78,8 @@ if slice_fn == "nurs":
     evals_per_step = n_slices * (2 ** n_expand + 1)
 elif slice_fn == "mh":
     evals_per_step = n_slices * 1       # exactly 1 eval per MH step
+elif slice_fn == "mh_multi":
+    evals_per_step = n_slices * n_expand  # k=n_expand proposals evaluated
 else:
     evals_per_step = n_slices * (2 * n_expand + n_shrink)
 

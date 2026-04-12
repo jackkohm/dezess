@@ -34,6 +34,7 @@ from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_ga
 # Slice modules
 from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejection, early_stop, overrelaxed, nurs as nurs_slice, multi_try as multi_try_slice, adaptive as adaptive_slice
 from dezess.slice import mh as mh_slice
+from dezess.slice import mh_multi as mh_multi_slice
 # Z-matrix modules
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
@@ -79,6 +80,7 @@ SLICE_STRATEGIES = {
     "multi_try": multi_try_slice,
     "adaptive": adaptive_slice,
     "mh": mh_slice,
+    "mh_multi": mh_multi_slice,
 }
 
 ZMATRIX_STRATEGIES = {
