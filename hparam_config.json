@@ -6,7 +6,7 @@
   "direction": "de_mcz",
   "direction_kwargs": {},
   "width": "scale_aware",
-  "width_kwargs": {"scale_factor": 5.0},
+  "width_kwargs": {"scale_factor": 7.0},
   "slice_fn": "mh_multi",
   "slice_kwargs": {}
 }
