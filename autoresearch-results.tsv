@@ -39,3 +39,5 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 37	128	whitened	scale_aware	mh_multi	1	1	1	0.000000	-0.012206	discard	whitened scale_factor=0.2: R-hat up to 20 (width miscalibrated)
 38	128	de_mcz	scale_aware	mh_multi	1	2	2	0.009939	-0.002267	discard	n_slices=2 orthogonal dirs: 1.8x ESS at 2x cost, net worse
 39	128	de_mcz	scale_aware	mh_multi	1	1	1	0.010798	-0.001408	discard	scale_factor=7.0 worse than 5.0
+40	128	de_mcz	scale_aware	mh_adaptive	1	1	1	0.011507	-0.000699	discard	full-cov MH 2.38/sqrt(d): worse on hard targets
+41	128	de_mcz	scale_aware	mh_multi	1	1	1	0.011712	-0.000494	discard	scale_factor=6.0 worse than 5.0
