@@ -76,6 +76,8 @@ N_WARMUP  = 1500
 # nurs:             2^n_expand + 1  (orbit of size 2^n_expand + 1 shift-proposal eval)
 if slice_fn == "nurs":
     evals_per_step = n_slices * (2 ** n_expand + 1)
+elif slice_fn == "mh":
+    evals_per_step = n_slices * 1       # exactly 1 eval per MH step
 else:
     evals_per_step = n_slices * (2 * n_expand + n_shrink)
 
