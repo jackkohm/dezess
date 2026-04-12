@@ -46,3 +46,5 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 44	128	de_mcz	scale_aware	mh_multi	1	1	1	0.012403	-0.000189	discard	scale_factor=4.5 worse than 4.0
 45	128	de_mcz	cov_aware	mh_multi	1	1	1	0.002484	-0.010108	discard	cov_aware bug: cov_chol=identity (never updated), R-hat fail on hard targets
 46	128	de_mcz	cov_aware	mh_multi	1	1	1	0.012850	+0.000258	keep	cov_aware(4.0) NEW BEST — exact sigma_d beats scale_aware proxy
+47	128	de_mcz	cov_aware	mh_multi	1	1	1	0.011477	-0.001373	discard	cov_aware scale_factor=3.0 worse than 4.0
+48	128	de_mcz	cov_aware	mh_multi	1	1	1	0.014727	+0.001877	keep	cov_aware scale_factor=5.0 NEW BEST
