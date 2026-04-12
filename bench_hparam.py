@@ -21,7 +21,7 @@ jax.config.update("jax_enable_x64", True)
 
 from dezess.core.loop import run_variant
 from dezess.core.types import VariantConfig
-from dezess.targets import ill_conditioned_gaussian, neals_funnel, correlated_gaussian
+from dezess.targets import ill_conditioned_gaussian, correlated_gaussian, gaussian_mixture
 
 # --- Load config ---
 with open("hparam_config.json") as f:
@@ -62,10 +62,13 @@ config = VariantConfig(
 )
 
 # Hard targets: high-dimensional, n_walkers << n_dim
+# - ill_conditioned_60: very elongated, tests direction quality in high-dim
+# - correlated_60: highly correlated 60D Gaussian, tests traversal speed
+# - mixture_10: multimodal, tests cross-mode mixing (different challenge type)
 TARGETS = [
     ("ill_conditioned_60", ill_conditioned_gaussian(60, condition=1000.0)),
-    ("funnel_30",          neals_funnel(30)),
     ("correlated_60",      correlated_gaussian(60)),
+    ("mixture_10",         gaussian_mixture(10)),
 ]
 
 N_SAMPLES = 2000
