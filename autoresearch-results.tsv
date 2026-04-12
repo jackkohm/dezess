@@ -48,3 +48,6 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 46	128	de_mcz	cov_aware	mh_multi	1	1	1	0.012850	+0.000258	keep	cov_aware(4.0) NEW BEST — exact sigma_d beats scale_aware proxy
 47	128	de_mcz	cov_aware	mh_multi	1	1	1	0.011477	-0.001373	discard	cov_aware scale_factor=3.0 worse than 4.0
 48	128	de_mcz	cov_aware	mh_multi	1	1	1	0.014727	+0.001877	keep	cov_aware scale_factor=5.0 NEW BEST
+49	128	de_mcz	cov_aware	mh_multi	1	1	1	0.014616	-0.000111	discard	cov_aware scale_factor=6.0 slightly worse
+50	128	de_mcz	cov_aware	mh_multi	1	1	1	0.014426	-0.000301	discard	cov_aware scale_factor=4.5 worse than 5.0
+51	128	de_mcz	cov_aware	mh_multi	1	1	1	0.015464	+0.000737	keep	cov_aware scale_factor=5.5 NEW BEST
