@@ -7,6 +7,6 @@
   "direction_kwargs": {},
   "width": "scale_aware",
   "width_kwargs": {"scale_factor": 5.0},
-  "slice_fn": "mh_multi",
+  "slice_fn": "mh_delayed",
   "slice_kwargs": {}
 }

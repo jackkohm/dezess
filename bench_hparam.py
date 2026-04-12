@@ -83,6 +83,8 @@ elif slice_fn == "mh":
     evals_per_step = n_slices * 1       # exactly 1 eval per MH step
 elif slice_fn == "mh_multi":
     evals_per_step = n_slices * n_expand  # k=n_expand proposals evaluated
+elif slice_fn == "mh_delayed":
+    evals_per_step = n_slices * 2         # always 2 evals (stage1 + stage2)
 else:
     evals_per_step = n_slices * (2 * n_expand + n_shrink)
 
