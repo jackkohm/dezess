@@ -4,7 +4,7 @@
   "n_shrink": 1,
   "n_slices_per_step": 1,
   "direction": "momentum",
-  "direction_kwargs": {"alpha": 0.99},
+  "direction_kwargs": {"alpha": 0.999},
   "width": "scale_aware",
   "width_kwargs": {"scale_factor": 3.0},
   "slice_fn": "mh_multi",
