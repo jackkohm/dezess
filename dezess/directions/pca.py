@@ -52,21 +52,30 @@ def sample_direction(
     pca_components: Array = None,
     pca_weights: Array = None,
     pca_mix: float = 0.5,
+    pca_power: float = 1.0,
     **kwargs,
 ) -> tuple[Array, Array, Array]:
     """Sample direction: mix of PCA component and DE-MCz.
 
-    With probability pca_mix, sample a principal component weighted by
-    eigenvalue. Otherwise, use standard DE-MCz pair difference.
+    With probability pca_mix, sample a principal component. Otherwise,
+    use standard DE-MCz pair difference.
 
     Parameters
     ----------
     pca_components : (n_dim, n_dim) or None
         Principal components (rows). If None, uses pure DE-MCz.
     pca_weights : (n_dim,) or None
-        Sampling weights for each component.
+        Eigenvalue-proportional sampling weights.
     pca_mix : float
         Probability of using PCA direction vs DE-MCz.
+    pca_power : float
+        Controls eigenvalue weighting of PCA component selection.
+        1.0 = proportional to eigenvalue (default, favours high-variance axes).
+        0.0 = uniform across all components (equal mixing time per eigenvector).
+        Intermediate values interpolate. For maximising ESS_min on
+        ill-conditioned targets, pca_power=0.0 is optimal: each eigenvector
+        is visited equally often and cov_aware calibrates the step size, so
+        ALL directions mix at the same rate regardless of condition number.
     """
     key, k_choice, k_comp, k_sign, k_idx1, k_idx2 = jax.random.split(key, 6)
 
@@ -78,9 +87,13 @@ def sample_direction(
     if pca_weights is None:
         pca_weights = jnp.ones(n_dim) / n_dim
 
-    # Gumbel-max trick for weighted sampling (faster than jax.random.choice)
+    # Gumbel-max trick for weighted sampling.
+    # pca_power=1.0: eigenvalue-proportional (original behaviour).
+    # pca_power=0.0: uniform (each eigenvector equally likely) — optimal for ESS_min.
+    effective_weights = pca_weights ** pca_power
+    effective_weights = effective_weights / jnp.maximum(jnp.sum(effective_weights), 1e-30)
     gumbel = -jnp.log(-jnp.log(jax.random.uniform(k_comp, (n_dim,), dtype=jnp.float64) + 1e-30) + 1e-30)
-    log_weights = jnp.log(pca_weights + 1e-30)
+    log_weights = jnp.log(effective_weights + 1e-30)
     comp_idx = jnp.argmax(log_weights + gumbel)
     d_pca = pca_components[comp_idx]
     # Random sign for symmetry

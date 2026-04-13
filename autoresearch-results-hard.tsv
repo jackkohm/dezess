@@ -1,0 +1,7 @@
+iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	delta	decision	note
+New benchmark: metric=ESS/(N_SAMPLES*evals_per_step) — hard regime (dim>>walkers)
+0	128	de_mcz(pca_thr=100)	cov_aware(sf=7.0)	mh_multi	1	1	1	0.010266	-	STALE	INFLATED: bench was using n_expand=3 evals but reporting evals=1; true=0.003422
+1	128	de_mcz(pca_thr=100)	cov_aware(sf=9.0)	mh_multi	1	1	1	0.010569	+0.000303	STALE	INFLATED: true metric=0.003523 (3 evals/step)
+BENCHMARK_FIX	bench_hparam.py fixed to pass n_expand=3 in slice_kwargs; evals_per_step now correctly=3
+2	128	de_mcz(pca_thr=100)	cov_aware(sf=9.0)	mh_multi	3	1	1	0.003523	-	BASELINE	TRUE corrected baseline; ill=0.003871 corr=0.001910 mix=0.004788
+3	128	de_mcz(pca_thr=100)	cov_aware(sf=9.0)	mh_multi	3	1	1	0.003585	+0.000062	DISCARD	warmup=3000 improvement is within noise (seed1 reverses); reverted to warmup=1500

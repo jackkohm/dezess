@@ -88,7 +88,17 @@ def compute_cov_chol(z_padded, z_count, reg=1e-6):
 
     # Numerically stable covariance: divide by (n-1) for unbiased estimator
     cov = (z_c.T @ z_c) / max(n_z - 1, 1)
-    cov += reg * np.eye(n_dim)
+
+    # Adaptive regularization: use 1% of the median positive eigenvalue so that
+    # null-space directions (when n_walkers < n_dim) get a non-degenerate width
+    # proportional to the typical posterior scale, not a fixed tiny constant.
+    eigvals = np.linalg.eigvalsh(cov)
+    pos_eigvals = eigvals[eigvals > 0]
+    if len(pos_eigvals) > 0:
+        adaptive_reg = max(reg, 0.01 * float(np.median(pos_eigvals)))
+    else:
+        adaptive_reg = reg
+    cov += adaptive_reg * np.eye(n_dim)
 
     try:
         L = np.linalg.cholesky(cov)

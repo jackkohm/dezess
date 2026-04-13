@@ -53,3 +53,11 @@ iteration	n_walkers	direction	width	slice_fn	n_expand	n_shrink	n_slices	metric	d
 51	128	de_mcz	cov_aware	mh_multi	1	1	1	0.015464	+0.000737	keep	cov_aware scale_factor=5.5 NEW BEST
 52	128	de_mcz	cov_aware	mh_multi	1	1	1	0.015307	-0.000157	discard	cov_aware scale_factor=6.5 slightly worse than 5.5
 53	256	de_mcz	cov_aware	mh_multi	1	1	1	0.015565	+0.000101	keep	256W marginal improvement; richer Z-matrix helps slightly
+54	256	pca	cov_aware	mh_multi	1	1	1	0.013918	-0.001647	discard	pca_mix=1.0: 2x better ill_cond but kills mixture_10 (0.016 vs 0.031)
+55	256	pca	cov_aware	mh_multi	1	1	1	0.013760	-0.001805	discard	pca_mix=0.5: intermediate but still worse on mixture_10
+56	256	coordinate	cov_aware	mh_multi	1	1	1	0.015201	-0.000364	discard	coord_mix=0.3: hurts ill_cond/correlated, marginal gain on mixture_10
+57	256	de_mcz	cov_aware	mh_multi	1	1	1	0.005056	-0.010509	discard	inverse formula scale_factor=2.0: mixture_10 R-hat fail (walkers trapped in modes)
+58	256	de_mcz→pca	cov_aware	mh_multi	1	1	1	0.013780	-0.001785	discard	adaptive PCA threshold=20: mixture_10 cond=22>20, wrong switch; all targets worse
+59	256	de_mcz→pca	cov_aware	mh_multi	1	1	1	0.013780	0.000000	discard	threshold=40, pca_mix default=0.5: PCA blended, still kills mixture_10 cond=22
+60	256	de_mcz→pca	cov_aware	mh_multi	1	1	1	0.016423	+0.000858	keep	threshold=40, pca_mix=1.0, dir_mod fix: NEW BEST; but corr_60 hurt (empirical cond=56>40, wrong PCA switch)
+61	256	de_mcz→pca	cov_aware	mh_multi	1	1	1	pending	pending	pending	threshold=100: keeps corr_60 with DE-MCz (cond=56<100), ill_cond stays PCA (cond=1280>100)

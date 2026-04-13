@@ -1,12 +1,13 @@
 {
-  "n_walkers": 256,
-  "n_expand": 1,
+  "n_walkers": 128,
+  "n_warmup": 1500,
+  "n_expand": 3,
   "n_shrink": 1,
   "n_slices_per_step": 1,
   "direction": "de_mcz",
-  "direction_kwargs": {},
+  "direction_kwargs": {"cov_pca_threshold": 100, "pca_mix": 1.0},
   "width": "cov_aware",
-  "width_kwargs": {"scale_factor": 5.5},
+  "width_kwargs": {"scale_factor": 9.0},
   "slice_fn": "mh_multi",
-  "slice_kwargs": {}
+  "slice_kwargs": {"n_expand": 3}
 }

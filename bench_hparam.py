@@ -1,13 +1,17 @@
-"""Hyperparameter benchmark: measures ESS per total log-prob eval.
+"""Hyperparameter benchmark: hard-regime efficiency.
 
 Metric = ESS_min / (n_walkers * N_SAMPLES * evals_per_step)
 
-This is pure sampler efficiency: information gained per likelihood call,
-independent of parallelism. n_walkers appears in the denominator so adding
-walkers only wins if ESS scales proportionally.
+Same ESS-per-total-eval metric as before, but on harder targets where
+n_dim is comparable to or larger than n_walkers.
 
-Targets: ill_conditioned_60, funnel_30, correlated_60
-(high-dimensional, hard — tests regime where n_walkers << n_dim)
+Targets (hard — n_dim >= n_walkers):
+  - ill_cond_100: 100D, condition=1000  (empirical cond ~1575 with 128W)
+  - corr_100:     100D, condition=50    (empirical cond ~77  with 128W)
+  - mix_20:       20D Gaussian mixture  (empirical cond ~22  with 128W)
+
+These test the regime where the sampler must work much harder than the
+previous 60D targets with 256 walkers.
 
 Outputs 'METRIC: <float>' as last line for autoresearch verify command.
 """
@@ -27,22 +31,28 @@ from dezess.targets import ill_conditioned_gaussian, correlated_gaussian, gaussi
 with open("hparam_config.json") as f:
     cfg = json.load(f)
 
-n_walkers       = int(cfg["n_walkers"])
-n_expand        = int(cfg["n_expand"])
-n_shrink        = int(cfg["n_shrink"])
-n_slices        = int(cfg.get("n_slices_per_step", 1))
-direction       = cfg.get("direction", "de_mcz")
+n_walkers        = int(cfg["n_walkers"])
+n_expand         = int(cfg["n_expand"])
+n_shrink         = int(cfg["n_shrink"])
+n_slices         = int(cfg.get("n_slices_per_step", 1))
+N_WARMUP_CFG     = int(cfg.get("n_warmup", 1500))
+direction        = cfg.get("direction", "de_mcz")
 direction_kwargs = cfg.get("direction_kwargs", {})
-width           = cfg.get("width", "scale_aware")
-width_kwargs    = cfg.get("width_kwargs", {"scale_factor": 1.0})
-slice_fn        = cfg.get("slice_fn", "fixed")
-slice_kwargs    = cfg.get("slice_kwargs", {})
+width            = cfg.get("width", "scale_aware")
+width_kwargs     = cfg.get("width_kwargs", {"scale_factor": 1.0})
+slice_fn         = cfg.get("slice_fn", "fixed")
+slice_kwargs     = cfg.get("slice_kwargs", {})
 
-# Inject n_expand/n_shrink into slice_kwargs so they're respected
 if slice_fn == "fixed":
     slice_kwargs = dict(slice_kwargs)
     slice_kwargs.setdefault("n_expand", n_expand)
     slice_kwargs.setdefault("n_shrink", n_shrink)
+elif slice_fn == "mh_multi":
+    # Ensure slice_kwargs has n_expand so evals_per_step counts correctly.
+    # The loop defaults n_expand=3 for cov_aware width (vs 2 for scale_aware),
+    # so we must explicitly set it here to match the config file value.
+    slice_kwargs = dict(slice_kwargs)
+    slice_kwargs.setdefault("n_expand", n_expand)
 
 print(f"Config: n_walkers={n_walkers}, direction={direction}, width={width}, "
       f"slice={slice_fn}, n_expand={n_expand}, n_shrink={n_shrink}, "
@@ -61,30 +71,23 @@ config = VariantConfig(
     slice_kwargs=slice_kwargs,
 )
 
-# Hard targets: high-dimensional, n_walkers << n_dim
-# - ill_conditioned_60: very elongated, tests direction quality in high-dim
-# - correlated_60: highly correlated 60D Gaussian, tests traversal speed
-# - mixture_10: multimodal, tests cross-mode mixing (different challenge type)
 TARGETS = [
-    ("ill_conditioned_60", ill_conditioned_gaussian(60, condition=1000.0)),
-    ("correlated_60",      correlated_gaussian(60)),
-    ("mixture_10",         gaussian_mixture(10)),
+    ("ill_cond_100",  ill_conditioned_gaussian(100, condition=1000.0)),
+    ("corr_100",      correlated_gaussian(100)),
+    ("mix_20",        gaussian_mixture(20)),
 ]
 
 N_SAMPLES = 2000
-N_WARMUP  = 1500
+N_WARMUP  = N_WARMUP_CFG
 
-# Evals per walker per step (times n_slices for multi-direction)
-# fixed/early_stop: 2*n_expand (expand checks both L+R) + n_shrink (shrink proposals)
-# nurs:             2^n_expand + 1  (orbit of size 2^n_expand + 1 shift-proposal eval)
 if slice_fn == "nurs":
     evals_per_step = n_slices * (2 ** n_expand + 1)
 elif slice_fn == "mh":
-    evals_per_step = n_slices * 1       # exactly 1 eval per MH step
+    evals_per_step = n_slices * 1
 elif slice_fn == "mh_multi":
-    evals_per_step = n_slices * n_expand  # k=n_expand proposals evaluated
+    evals_per_step = n_slices * n_expand
 elif slice_fn == "mh_adaptive":
-    evals_per_step = n_slices * 1  # 1 eval per full-covariance MH step
+    evals_per_step = n_slices * 1
 else:
     evals_per_step = n_slices * (2 * n_expand + n_shrink)
 
@@ -109,14 +112,12 @@ for name, target in TARGETS:
         streaming = result["diagnostics"].get("streaming", {})
         ess  = float(streaming.get("ess_min", 0.0))
         wall = float(result["wall_time"])
-
         total_evals = n_walkers * N_SAMPLES * evals_per_step
         rhat = float(streaming.get("rhat_max", float("inf")))
         ess_per_eval = ess / total_evals if total_evals > 0 else 0.0
 
-        # Guard: R-hat > 1.1 means chains not converged — penalise to zero
         if rhat > 1.1:
-            print(f"  {name}: ESS={ess:.1f}, R-hat={rhat:.4f} FAIL, ESS/eval=0 (not converged)")
+            print(f"  {name}: ESS={ess:.1f}, R-hat={rhat:.4f} FAIL, ESS/eval=0")
             metric_values.append(0.0)
         else:
             metric_values.append(ess_per_eval)

@@ -27,7 +27,7 @@ from dezess.diagnostics import StreamingDiagnostics
 from dezess.transforms import Transform, identity
 
 # Direction modules
-from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction, global_move
+from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction, global_move, random_gaussian
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -62,6 +62,7 @@ DIRECTION_STRATEGIES = {
     "local_pair": local_pair,
     "kde": kde_direction,
     "global_move": global_move,
+    "random_gaussian": random_gaussian,
 }
 
 WIDTH_STRATEGIES = {
@@ -175,6 +176,10 @@ def run_variant(
     lp_eval = safe_log_prob if config.check_nans else unsafe_log_prob
 
     dir_kwargs = dict(config.direction_kwargs)
+    # Pop meta-parameter: threshold for automatic PCA direction switch after warmup.
+    # If empirical condition number > cov_pca_threshold and direction=="de_mcz",
+    # switch to PCA for production (requires width="cov_aware" so cov_chol is available).
+    cov_pca_threshold = float(dir_kwargs.pop("cov_pca_threshold", 0))
     # For gradient directions, compute grad_fn from log_prob
     if config.direction == "gradient":
         dir_kwargs["grad_fn"] = jax.grad(lambda x: safe_log_prob(log_prob_fn, x))
@@ -399,10 +404,14 @@ def run_variant(
                         # Store for next iteration's orthogonalization
                         pdirs = pdirs.at[i + 1].set(d_new)
 
-                        # Scale-aware width using raw norm
+                        # Width for additional slice — pass cov_chol if width=cov_aware
                         w_aux_c = w_aux._replace(direction_scale=norm_raw)
                         w_key_c, k_w = jax.random.split(w_key_c)
-                        mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w, **width_kwargs)
+                        if config.width == "cov_aware":
+                            mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w,
+                                                        cov_chol=cov_chol, **width_kwargs)
+                        else:
+                            mu_eff_c = width_mod.get_mu(mu, d_new, w_aux_c, key=k_w, **width_kwargs)
                         def lp_fn_multi(x):
                             return lp_eval(log_prob_fn, x) / temp
                         x_c, _, w_key_c, found_new, L_new, R_new = slice_mod.execute(
@@ -889,13 +898,33 @@ def run_variant(
         whitening_matrix = whitened.compute_whitening_matrix(z_padded, z_count)
 
     # Compute empirical covariance Cholesky if using mh_adaptive or cov_aware width
+    cov_chol_updated = False
     if (config.slice_fn == "mh_adaptive" or config.width == "cov_aware") and n_warmup > 0:
         if verbose:
             print(f"  [{config.name}] Computing empirical covariance Cholesky...", flush=True)
         cov_chol = mh_adaptive_slice.compute_cov_chol(z_padded, z_count)
+        cov_chol_updated = True
         if verbose:
             diag_std = float(jnp.sqrt(jnp.diag(cov_chol @ cov_chol.T).mean()))
             print(f"  [{config.name}] cov_chol ready: mean_std={diag_std:.3f}", flush=True)
+
+    # Adaptive direction switching: measure empirical condition number and switch
+    # de_mcz → pca when the target appears ill-conditioned (unimodal, high aspect ratio).
+    # Unimodal ill-conditioned targets benefit 2x from PCA directions (clean eigenvector
+    # proposals vs noisy DE-MCz mixture directions). Multimodal targets (low condition
+    # number, ~10) correctly stay with de_mcz for inter-mode exploration.
+    if (cov_pca_threshold > 0
+            and config.direction == "de_mcz"
+            and cov_chol_updated):
+        Sigma = cov_chol @ cov_chol.T
+        eigvals = jnp.linalg.eigvalsh(Sigma)
+        empirical_condition = float(eigvals[-1] / jnp.maximum(eigvals[0], jnp.float64(1e-30)))
+        if empirical_condition > cov_pca_threshold:
+            config = config._replace(direction="pca")
+            dir_mod = DIRECTION_STRATEGIES["pca"]   # update module to match new config
+            pca_components, pca_weights = pca.compute_pca_components(z_padded, z_count)
+            if verbose:
+                print(f"  [{config.name}] Auto-PCA: empirical_condition={empirical_condition:.1f} > threshold={cov_pca_threshold:.1f}", flush=True)
 
     # Compute KDE bandwidth if using KDE directions
     if config.direction == "kde" and n_warmup > 0:
