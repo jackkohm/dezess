@@ -1,6 +1,6 @@
 {
   "n_walkers": 128,
-  "n_warmup": 1500,
+  "n_warmup": 3000,
   "n_expand": 3,
   "n_shrink": 1,
   "n_slices_per_step": 1,
