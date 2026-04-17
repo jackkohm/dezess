@@ -273,7 +273,9 @@ def run_variant(
                 walker_sh, walker_sh,                            # found, bracket_ratios
                 walker_sh, walker_sh, walker_sh, walker_sh,      # 4 new walker aux
             )
-            jit_decorator = jax.jit(
+            from functools import partial
+            jit_decorator = partial(
+                jax.jit,
                 in_shardings=in_shardings,
                 out_shardings=out_shardings,
             )
@@ -500,7 +502,9 @@ def run_variant(
         if sharding_info is not None:
             walker_sh = sharding_info["walker_sharding"]
             repl_sh = sharding_info["replicated"]
-            block_jit = jax.jit(
+            from functools import partial
+            block_jit = partial(
+                jax.jit,
                 in_shardings=(
                     walker_sh, walker_sh,                       # positions, log_probs
                     repl_sh, repl_sh, repl_sh, repl_sh,         # z_padded, z_count, mu_blocks_arg, key
@@ -545,12 +549,35 @@ def run_variant(
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
 
-                    # Slice sample
-                    x_new, lp_new, wk, found, L, R = slice_sample_fixed(
-                        lambda x: lp_eval(log_prob_fn, x),
-                        x_full, d_full, lp, mu_eff, wk,
-                        n_expand=n_expand, n_shrink=n_shrink,
-                    )
+                    # Slice sample — dispatch to configured slice strategy
+                    if config.slice_fn == "nurs":
+                        x_new, lp_new, wk, found, L, R = nurs_slice.execute(
+                            lambda x: lp_eval(log_prob_fn, x),
+                            x_full, d_full, lp, mu_eff, wk,
+                            n_expand=slice_kwargs.get("n_expand", 3),
+                            n_shrink=slice_kwargs.get("n_shrink", 12),
+                            density_threshold=slice_kwargs.get("density_threshold", 0.001),
+                        )
+                    elif config.slice_fn == "early_stop":
+                        x_new, lp_new, wk, found, L, R = early_stop.execute(
+                            lambda x: lp_eval(log_prob_fn, x),
+                            x_full, d_full, lp, mu_eff, wk,
+                            n_expand=slice_kwargs.get("n_expand", n_expand),
+                            n_shrink=slice_kwargs.get("n_shrink", n_shrink),
+                        )
+                    elif config.slice_fn == "adaptive":
+                        x_new, lp_new, wk, found, L, R = adaptive_slice.execute(
+                            lambda x: lp_eval(log_prob_fn, x),
+                            x_full, d_full, lp, mu_eff, wk,
+                            n_expand=slice_kwargs.get("n_expand", 50),
+                            n_shrink=slice_kwargs.get("n_shrink", 50),
+                        )
+                    else:
+                        x_new, lp_new, wk, found, L, R = slice_sample_fixed(
+                            lambda x: lp_eval(log_prob_fn, x),
+                            x_full, d_full, lp, mu_eff, wk,
+                            n_expand=n_expand, n_shrink=n_shrink,
+                        )
                     br = (R - L) / jnp.maximum(mu_eff, 1e-30)
                     return x_new, lp_new, wk, br
 
