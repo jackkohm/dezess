@@ -42,3 +42,44 @@ def test_setup_sharding_multi_gpu_returns_shardings():
     assert "mesh" in result
     assert "walker_sharding" in result
     assert "replicated" in result
+
+
+def test_run_variant_default_single_gpu_unchanged():
+    """run_variant with defaults (no n_gpus) should behave identically to before."""
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x**2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (32, 5)) * 0.1
+
+    config = VariantConfig(
+        name="single_gpu",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        check_nans=False,
+        width_kwargs={"scale_factor": 1.0},
+    )
+
+    result = run_variant(log_prob, init, n_steps=500, config=config,
+                         n_warmup=200, verbose=False)
+    samples = np.array(result["samples"])
+    assert samples.shape == (300, 32, 5)
+
+
+def test_init_positions_sharded_onto_mesh():
+    """When n_gpus > 1, init_positions get distributed onto the mesh."""
+    from dezess.core.sharding import setup_sharding
+
+    if len(jax.devices()) < 2:
+        pytest.skip("Need >= 2 devices")
+
+    sharding_info = setup_sharding(n_gpus=2, n_walkers_total=64)
+    init = jax.random.normal(jax.random.PRNGKey(42), (64, 5))
+
+    sharded = jax.device_put(init, sharding_info["walker_sharding"])
+    assert sharded.sharding == sharding_info["walker_sharding"]
+    addressable = sharded.addressable_data(0).shape
+    assert addressable[0] == 32  # 64 / 2 = 32 per device

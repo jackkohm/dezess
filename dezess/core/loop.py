@@ -118,6 +118,8 @@ def run_variant(
     progress_fn: Optional[Callable] = None,
     verbose: bool = True,
     transform: Optional[Transform] = None,
+    n_gpus: int = 1,                          # NEW
+    n_walkers_per_gpu: Optional[int] = None,  # NEW
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -133,6 +135,20 @@ def run_variant(
     if config is None:
         config = DEFAULT_CONFIG
     n_walkers, n_dim = init_positions.shape
+
+    # --- Multi-GPU sharding setup ---
+    from dezess.core.sharding import setup_sharding
+    if n_gpus > 1:
+        if n_walkers_per_gpu is None:
+            n_walkers_per_gpu = n_walkers // n_gpus
+        expected = n_gpus * n_walkers_per_gpu
+        if n_walkers != expected:
+            raise ValueError(
+                f"init_positions has {n_walkers} walkers but n_gpus={n_gpus} "
+                f"x n_walkers_per_gpu={n_walkers_per_gpu} = {expected} expected"
+            )
+    sharding_info = setup_sharding(n_gpus, n_walkers)
+
     if key is None:
         key = jax.random.PRNGKey(0)
     mu = jnp.float64(mu)
@@ -600,6 +616,8 @@ def run_variant(
     if verbose:
         print(f"  [{config.name}] Computing initial log-probs...", flush=True)
     positions = jnp.array(init_positions, dtype=jnp.float64)
+    if sharding_info is not None:
+        positions = jax.device_put(positions, sharding_info["walker_sharding"])
     log_probs = jax.jit(jax.vmap(lambda x: lp_eval(log_prob_fn, x)))(positions)
     log_probs.block_until_ready()
 
