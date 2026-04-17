@@ -1125,16 +1125,48 @@ def run_variant(
                 b_idx = padded_blocks[block_idx]
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
+                # Replicate snapshot for complementary direction reads (multi-GPU only)
+                if use_complementary and sharding_info is not None:
+                    pos = jax.lax.with_sharding_constraint(
+                        pos, sharding_info["replicated"]
+                    )
+
                 def _mh_walker(x_full, lp, wk, walker_idx):
                     wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
 
-                    # Covariance-adapted proposal: L @ z
+                    # --- Cov-based direction (always computed) ---
                     L_b = block_L_padded[block_idx]  # (max_block_size, max_block_size)
                     z_rand = jax.random.normal(k1, (max_block_size,), dtype=jnp.float64)
                     z_rand = z_rand * mask  # zero out padding dims
-                    delta = L_b @ z_rand
-                    delta = delta * mask
-                    norm = jnp.linalg.norm(delta)
+                    delta_cov = L_b @ z_rand
+                    delta_cov = delta_cov * mask
+                    norm_cov = jnp.linalg.norm(delta_cov)
+
+                    if use_complementary:
+                        # --- Complementary direction from snapshot ---
+                        wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                        half_size = n_walkers // 2
+                        my_half = walker_idx >= half_size
+                        comp_offset = jnp.where(my_half, 0, half_size)
+
+                        j_off = jax.random.randint(kc1, (), 0, half_size)
+                        k_off = jax.random.randint(kc2, (), 0, half_size)
+                        k_off = jnp.where(k_off == j_off, (k_off + 1) % half_size, k_off)
+                        j_idx = comp_offset + j_off
+                        k_idx = comp_offset + k_off
+
+                        c1_block = pos[j_idx, b_idx]
+                        c2_block = pos[k_idx, b_idx]
+                        diff_comp = (c1_block - c2_block) * mask
+                        norm_comp = jnp.linalg.norm(diff_comp)
+
+                        use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
+                        delta = jnp.where(use_comp, diff_comp, delta_cov)
+                        norm = jnp.where(use_comp, norm_comp, norm_cov)
+                    else:
+                        delta = delta_cov
+                        norm = norm_cov
+
                     d_block = delta / jnp.maximum(norm, 1e-30)
 
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
