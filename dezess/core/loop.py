@@ -692,8 +692,18 @@ def run_variant(
             print(f"  [{config.name}] JIT compile: {t_jit:.1f}s", flush=True)
 
     # Update Z after JIT warmup step
+    if sharding_info is not None:
+        # All-gather walker positions to every GPU before append
+        # (Z-matrix is replicated; positions are walker-sharded)
+        pos_full = jax.lax.with_sharding_constraint(
+            positions, sharding_info["replicated"])
+        lp_full = jax.lax.with_sharding_constraint(
+            log_probs, sharding_info["replicated"])
+    else:
+        pos_full = positions
+        lp_full = log_probs
     z_padded, z_count, z_log_probs = circular_zmatrix.append(
-        z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+        z_padded, z_count, z_log_probs, pos_full, lp_full, z_max_size,
     )
 
     # --- Warmup ---
@@ -758,8 +768,18 @@ def run_variant(
 
         # Append to Z-matrix (every 5 steps to reduce overhead)
         if step % 5 == 0 or step == n_warmup - 1:
+            if sharding_info is not None:
+                # All-gather walker positions to every GPU before append
+                # (Z-matrix is replicated; positions are walker-sharded)
+                pos_full = jax.lax.with_sharding_constraint(
+                    positions, sharding_info["replicated"])
+                lp_full = jax.lax.with_sharding_constraint(
+                    log_probs, sharding_info["replicated"])
+            else:
+                pos_full = positions
+                lp_full = log_probs
             z_padded, z_count, z_log_probs = circular_zmatrix.append(
-                z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+                z_padded, z_count, z_log_probs, pos_full, lp_full, z_max_size,
             )
 
         # Track cap-hits for adaptive budget
@@ -848,8 +868,18 @@ def run_variant(
                     mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                     walker_aux_ds, temperatures,
                 )
+                if sharding_info is not None:
+                    # All-gather walker positions to every GPU before append
+                    # (Z-matrix is replicated; positions are walker-sharded)
+                    pos_full = jax.lax.with_sharding_constraint(
+                        positions, sharding_info["replicated"])
+                    lp_full = jax.lax.with_sharding_constraint(
+                        log_probs, sharding_info["replicated"])
+                else:
+                    pos_full = positions
+                    lp_full = log_probs
                 z_padded, z_count, z_log_probs = circular_zmatrix.append(
-                    z_padded, z_count, z_log_probs, positions, log_probs, z_max_size,
+                    z_padded, z_count, z_log_probs, pos_full, lp_full, z_max_size,
                 )
                 extra_done += 1
                 if tune and (extra_step + 1) % TUNE_INTERVAL == 0:
@@ -1249,7 +1279,9 @@ def run_variant(
 
     # Build a batched scan step for reduced Python overhead.
     # Batches SCAN_BATCH steps into a single JIT call via lax.scan.
-    SCAN_BATCH = 50
+    # Scan batch size: K=100 for sharded runs (matches checkpoint cadence),
+    # 50 for single-GPU (current behavior, lower memory in flight).
+    SCAN_BATCH = 100 if sharding_info is not None else 50
     # scan doesn't support swaps, live Z-matrix, or block-Gibbs
     # (block-Gibbs permutes blocks each step so can't batch)
     use_scan = (config.ensemble not in ("parallel_tempering", "block_gibbs")) and not live_z
@@ -1273,6 +1305,14 @@ def run_variant(
             (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
              walker_aux_da, walker_aux_ds) = carry
             batch_samples, batch_lps, batch_found, batch_br = outputs
+
+            # Gather sharded samples to replicated form before host transfer
+            if sharding_info is not None:
+                batch_samples = jax.lax.with_sharding_constraint(
+                    batch_samples, sharding_info["replicated"])
+                batch_lps = jax.lax.with_sharding_constraint(
+                    batch_lps, sharding_info["replicated"])
+
             return (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
                     walker_aux_da, walker_aux_ds,
                     batch_samples, batch_lps, batch_found, batch_br)
