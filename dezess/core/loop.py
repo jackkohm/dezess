@@ -478,6 +478,12 @@ def run_variant(
     use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
     use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
     use_block_cov = use_block_mh and ens_kwargs.get("use_block_cov", False)
+    complementary_prob = float(ens_kwargs.get("complementary_prob", 0.0))
+    if not (0.0 <= complementary_prob <= 1.0):
+        raise ValueError(
+            f"complementary_prob must be in [0.0, 1.0], got {complementary_prob}"
+        )
+    use_complementary = complementary_prob > 0.0
     conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
     use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
@@ -528,7 +534,7 @@ def run_variant(
                 # Mask: 1 for valid block indices, 0 for padding
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
-                def _update_walker(x_full, lp, wk):
+                def _update_walker(x_full, lp, wk, walker_idx):
                     wk, k1, k2 = jax.random.split(wk, 3)
                     idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
@@ -583,7 +589,8 @@ def run_variant(
 
                 k, k_walkers = jax.random.split(k)
                 wkeys = jax.random.split(k_walkers, n_walkers)
-                new_pos, new_lp, _, brs = jax.vmap(_update_walker)(pos, lps, wkeys)
+                walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
+                new_pos, new_lp, _, brs = jax.vmap(_update_walker)(pos, lps, wkeys, walker_indices)
                 mean_br = jnp.mean(brs)
                 return (new_pos, new_lp, k), mean_br
 
@@ -609,7 +616,7 @@ def run_variant(
                 b_idx = padded_blocks[block_idx]
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
-                def _mh_walker(x_full, lp, wk):
+                def _mh_walker(x_full, lp, wk, walker_idx):
                     wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
                     idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
@@ -675,7 +682,8 @@ def run_variant(
 
                 k, k_walkers = jax.random.split(k)
                 wkeys = jax.random.split(k_walkers, n_walkers)
-                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys, walker_indices)
                 mean_br = jnp.mean(brs)
                 return (new_pos, new_lp, k), mean_br
 
@@ -1085,7 +1093,7 @@ def run_variant(
                 b_idx = padded_blocks[block_idx]
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
-                def _mh_walker(x_full, lp, wk):
+                def _mh_walker(x_full, lp, wk, walker_idx):
                     wk, k1, k2, k_accept1 = jax.random.split(wk, 4)
 
                     # Covariance-adapted proposal: L @ z
@@ -1144,7 +1152,8 @@ def run_variant(
 
                 k, k_walkers = jax.random.split(k)
                 wkeys = jax.random.split(k_walkers, n_walkers)
-                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys)
+                walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
+                new_pos, new_lp, _, brs = jax.vmap(_mh_walker)(pos, lps, wkeys, walker_indices)
                 mean_br = jnp.mean(brs)
                 return (new_pos, new_lp, k), mean_br
 
@@ -1182,7 +1191,7 @@ def run_variant(
             pot_mu = mu_blocks_arg[0]
             pot_mask = (jnp.arange(max_block_size) < pot_bsize).astype(jnp.float64)
 
-            def _mh_pot_walker(x_full, lp, wk):
+            def _mh_pot_walker(x_full, lp, wk, walker_idx):
                 wk, k1, k2, k_accept = jax.random.split(wk, 4)
                 idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
@@ -1209,8 +1218,9 @@ def run_variant(
 
             key, k_pot = jax.random.split(key)
             pot_keys = jax.random.split(k_pot, n_walkers)
+            walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
             positions, log_probs, _ = jax.vmap(_mh_pot_walker)(
-                positions, log_probs, pot_keys)
+                positions, log_probs, pot_keys, walker_indices)
 
             # ---- Round 2: Update all stream blocks in parallel ----
             cond_block_indices = jnp.arange(n_conditional_blocks, dtype=jnp.int32)
@@ -1218,7 +1228,7 @@ def run_variant(
             cond_mus = mu_blocks_arg[1:]               # (n_cond,)
             cond_b_idxs = padded_blocks[1:]            # (n_cond, max_block_size)
 
-            def _mh_one_stream(x_full, wk, stream_idx):
+            def _mh_one_stream(x_full, wk, stream_idx, walker_idx):
                 """MH update for one stream block. Returns proposed position and accept flag."""
                 wk, k1, k2, k_accept = jax.random.split(wk, 4)
                 s_b_idx = cond_b_idxs[stream_idx]
@@ -1251,13 +1261,13 @@ def run_variant(
                 accept = log_u < (cond_lp_new - cond_lp_old)
                 return x_prop, accept
 
-            def _update_all_streams_one_walker(x_full, wk):
+            def _update_all_streams_one_walker(x_full, wk, walker_idx):
                 """Update all stream blocks for one walker, return merged position."""
                 wk_streams = jax.random.split(wk, n_conditional_blocks)
 
                 # vmap over stream indices: propose for each stream independently
                 x_proposals, accepts = jax.vmap(
-                    lambda wk_s, s_idx: _mh_one_stream(x_full, wk_s, s_idx),
+                    lambda wk_s, s_idx: _mh_one_stream(x_full, wk_s, s_idx, walker_idx),
                     in_axes=(0, 0)
                 )(wk_streams, cond_block_indices)
                 # x_proposals: (n_cond, ndim), accepts: (n_cond,)
@@ -1286,7 +1296,8 @@ def run_variant(
 
             key, k_streams = jax.random.split(key)
             stream_keys = jax.random.split(k_streams, n_walkers)
-            positions = jax.vmap(_update_all_streams_one_walker)(positions, stream_keys)
+            walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
+            positions = jax.vmap(_update_all_streams_one_walker)(positions, stream_keys, walker_indices)
 
             # ---- Round 3: Re-evaluate full log_prob for consistency ----
             log_probs = jax.vmap(lambda x: lp_eval(log_prob_fn, x))(positions)
