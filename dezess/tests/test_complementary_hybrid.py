@@ -58,3 +58,35 @@ def test_complementary_prob_zero_matches_current_bg_mh_dr():
         np.array(result_default["samples"]),
         err_msg="complementary_prob=0.0 must be byte-identical to default bg_MH+DR",
     )
+
+
+def test_complementary_prob_half_recovers_gaussian_variance():
+    """complementary_prob=0.5 on 21D Gaussian: variance approx 1.0."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x**2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (32, 21)) * 0.1
+
+    config = _make_bg_mh_dr_config(complementary_prob=0.5)
+    result = run_variant(
+        log_prob, init, n_steps=3000, config=config,
+        n_warmup=1500, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    flat = samples.reshape(-1, 21)
+    mean_var = float(np.var(flat, axis=0).mean())
+    assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"
+
+
+def test_complementary_prob_one_recovers_gaussian_variance():
+    """complementary_prob=1.0 (pure complementary) on 21D Gaussian."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x**2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (32, 21)) * 0.1
+
+    config = _make_bg_mh_dr_config(complementary_prob=1.0)
+    result = run_variant(
+        log_prob, init, n_steps=3000, config=config,
+        n_warmup=1500, verbose=False,
+    )
+    samples = np.array(result["samples"])
+    flat = samples.reshape(-1, 21)
+    mean_var = float(np.var(flat, axis=0).mean())
+    assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"
