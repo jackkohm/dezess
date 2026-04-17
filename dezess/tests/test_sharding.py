@@ -114,3 +114,36 @@ def test_run_variant_n_gpus_2_recovers_gaussian_variance():
     flat = samples.reshape(-1, 10)
     mean_var = float(np.var(flat, axis=0).mean())
     assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"
+
+
+def test_block_gibbs_mh_dr_sharded():
+    """bg_MH+DR works with multi-GPU sharding."""
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+
+    if len(jax.devices()) < 2:
+        pytest.skip("Need >= 2 devices")
+
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x**2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (64, 21)) * 0.1
+
+    config = VariantConfig(
+        name="bg_mh_dr_sharded",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="block_gibbs",
+        check_nans=False,
+        width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"block_sizes": [7, 14], "use_mh": True,
+                         "delayed_rejection": True},
+    )
+
+    result = run_variant(log_prob, init, n_steps=1500, config=config,
+                         n_warmup=500, verbose=False,
+                         n_gpus=2, n_walkers_per_gpu=32)
+    samples = np.array(result["samples"])
+    flat = samples.reshape(-1, 21)
+    mean_var = float(np.var(flat, axis=0).mean())
+    assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"

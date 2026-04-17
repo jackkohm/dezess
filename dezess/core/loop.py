@@ -494,7 +494,26 @@ def run_variant(
         if use_conditional:
             n_conditional_blocks = n_blocks_val - 1  # blocks 1..N are conditional
 
-        @jax.jit
+        # Build sharded JIT decorator for block-Gibbs steps.
+        # Signature: (positions, log_probs, z_padded, z_count, mu_blocks_arg, key)
+        # Returns:   (pos_out, lps_out, k_out, mean_br)
+        if sharding_info is not None:
+            walker_sh = sharding_info["walker_sharding"]
+            repl_sh = sharding_info["replicated"]
+            block_jit = jax.jit(
+                in_shardings=(
+                    walker_sh, walker_sh,                       # positions, log_probs
+                    repl_sh, repl_sh, repl_sh, repl_sh,         # z_padded, z_count, mu_blocks_arg, key
+                ),
+                out_shardings=(
+                    walker_sh, walker_sh,                       # pos_out, lps_out
+                    repl_sh, repl_sh,                           # k_out, mean_br
+                ),
+            )
+        else:
+            block_jit = jax.jit
+
+        @block_jit
         def block_sweep_step(positions, log_probs, z_padded, z_count,
                              mu_blocks_arg, key):
 
@@ -553,7 +572,7 @@ def run_variant(
             return pos_out, lps_out, k_out, mean_br
 
         # --- Block-Gibbs MH: 1 eval per block instead of ~10 for slice ---
-        @jax.jit
+        @block_jit
         def block_mh_step(positions, log_probs, z_padded, z_count,
                           mu_blocks_arg, key):
 
@@ -1027,7 +1046,9 @@ def run_variant(
 
     # Re-JIT block step if block covariance was computed
     if use_block_cov and n_warmup > 0:
-        @jax.jit
+        # block_jit is defined in the use_block_gibbs branch above; since
+        # use_block_cov => use_block_mh => use_block_gibbs, it is in scope.
+        @block_jit
         def block_mh_cov_step(positions, log_probs, z_padded, z_count,
                               mu_blocks_arg, key):
 
@@ -1123,7 +1144,9 @@ def run_variant(
             print(f"  [{config.name}] Re-JIT: {time.time()-t_rejit:.1f}s", flush=True)
 
     if use_conditional:
-        @jax.jit
+        # block_jit defined in use_block_gibbs branch; use_conditional implies
+        # use_block_mh implies use_block_gibbs, so block_jit is in scope.
+        @block_jit
         def block_conditional_step(positions, log_probs, z_padded, z_count,
                                    mu_blocks_arg, key):
             # ---- Round 1: Update potential block (block 0) with full_log_prob ----
