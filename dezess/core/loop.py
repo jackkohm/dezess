@@ -534,8 +534,16 @@ def run_variant(
                 # Mask: 1 for valid block indices, 0 for padding
                 mask = (jnp.arange(max_block_size) < bsize).astype(jnp.float64)
 
+                # Replicate snapshot for complementary direction reads (multi-GPU only)
+                if use_complementary and sharding_info is not None:
+                    pos = jax.lax.with_sharding_constraint(
+                        pos, sharding_info["replicated"]
+                    )
+
                 def _update_walker(x_full, lp, wk, walker_idx):
                     wk, k1, k2 = jax.random.split(wk, 3)
+
+                    # --- Z-matrix direction (always computed) ---
                     idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                     idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
@@ -543,8 +551,34 @@ def run_variant(
                     # Direction in block subspace (full padded size)
                     z1_block = z_padded[idx1, b_idx]  # (max_block_size,)
                     z2_block = z_padded[idx2, b_idx]
-                    diff = (z1_block - z2_block) * mask  # zero out padding
-                    norm = jnp.linalg.norm(diff)
+                    diff_zmat = (z1_block - z2_block) * mask  # zero out padding
+                    norm_zmat = jnp.linalg.norm(diff_zmat)
+
+                    if use_complementary:
+                        # --- Complementary direction from snapshot ---
+                        wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                        half_size = n_walkers // 2
+                        my_half = walker_idx >= half_size
+                        comp_offset = jnp.where(my_half, 0, half_size)
+
+                        j_off = jax.random.randint(kc1, (), 0, half_size)
+                        k_off = jax.random.randint(kc2, (), 0, half_size)
+                        k_off = jnp.where(k_off == j_off, (k_off + 1) % half_size, k_off)
+                        j_idx = comp_offset + j_off
+                        k_idx = comp_offset + k_off
+
+                        c1_block = pos[j_idx, b_idx]
+                        c2_block = pos[k_idx, b_idx]
+                        diff_comp = (c1_block - c2_block) * mask
+                        norm_comp = jnp.linalg.norm(diff_comp)
+
+                        use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
+                        diff = jnp.where(use_comp, diff_comp, diff_zmat)
+                        norm = jnp.where(use_comp, norm_comp, norm_zmat)
+                    else:
+                        diff = diff_zmat
+                        norm = norm_zmat
+
                     d_block = diff / jnp.maximum(norm, 1e-30)
 
                     # Embed into full space: scatter block direction
@@ -1255,16 +1289,51 @@ def run_variant(
             pot_mu = mu_blocks_arg[0]
             pot_mask = (jnp.arange(max_block_size) < pot_bsize).astype(jnp.float64)
 
+            # Snapshot for complementary direction reads (multi-GPU only)
+            pot_pos_snapshot = positions
+            if use_complementary and sharding_info is not None:
+                pot_pos_snapshot = jax.lax.with_sharding_constraint(
+                    pot_pos_snapshot, sharding_info["replicated"]
+                )
+
             def _mh_pot_walker(x_full, lp, wk, walker_idx):
                 wk, k1, k2, k_accept = jax.random.split(wk, 4)
+
+                # --- Z-matrix direction (always computed) ---
                 idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
                 z1_b = z_padded[idx1, pot_b_idx]
                 z2_b = z_padded[idx2, pot_b_idx]
-                diff = (z1_b - z2_b) * pot_mask
-                norm = jnp.linalg.norm(diff)
+                diff_zmat = (z1_b - z2_b) * pot_mask
+                norm_zmat = jnp.linalg.norm(diff_zmat)
+
+                if use_complementary:
+                    # --- Complementary direction from snapshot ---
+                    wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                    half_size = n_walkers // 2
+                    my_half = walker_idx >= half_size
+                    comp_offset = jnp.where(my_half, 0, half_size)
+
+                    j_off = jax.random.randint(kc1, (), 0, half_size)
+                    k_off = jax.random.randint(kc2, (), 0, half_size)
+                    k_off = jnp.where(k_off == j_off, (k_off + 1) % half_size, k_off)
+                    j_idx = comp_offset + j_off
+                    k_idx = comp_offset + k_off
+
+                    c1_block = pot_pos_snapshot[j_idx, pot_b_idx]
+                    c2_block = pot_pos_snapshot[k_idx, pot_b_idx]
+                    diff_comp = (c1_block - c2_block) * pot_mask
+                    norm_comp = jnp.linalg.norm(diff_comp)
+
+                    use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
+                    diff = jnp.where(use_comp, diff_comp, diff_zmat)
+                    norm = jnp.where(use_comp, norm_comp, norm_zmat)
+                else:
+                    diff = diff_zmat
+                    norm = norm_zmat
+
                 dim_corr = jnp.sqrt(jnp.float64(pot_bsize) / 2.0)
                 mu_eff = pot_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
@@ -1292,6 +1361,13 @@ def run_variant(
             cond_mus = mu_blocks_arg[1:]               # (n_cond,)
             cond_b_idxs = padded_blocks[1:]            # (n_cond, max_block_size)
 
+            # Snapshot for complementary direction reads (multi-GPU only)
+            stream_pos_snapshot = positions
+            if use_complementary and sharding_info is not None:
+                stream_pos_snapshot = jax.lax.with_sharding_constraint(
+                    stream_pos_snapshot, sharding_info["replicated"]
+                )
+
             def _mh_one_stream(x_full, wk, stream_idx, walker_idx):
                 """MH update for one stream block. Returns proposed position and accept flag."""
                 wk, k1, k2, k_accept = jax.random.split(wk, 4)
@@ -1300,14 +1376,41 @@ def run_variant(
                 s_mu = cond_mus[stream_idx]
                 s_mask = (jnp.arange(max_block_size) < s_bsize).astype(jnp.float64)
 
+                # --- Z-matrix direction (always computed) ---
                 idx1 = jax.random.randint(k1, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jax.random.randint(k2, (), 0, z_padded.shape[0]) % z_count
                 idx2 = jnp.where(idx1 == idx2, (idx2 + 1) % z_count, idx2)
 
                 z1_b = z_padded[idx1, s_b_idx]
                 z2_b = z_padded[idx2, s_b_idx]
-                diff = (z1_b - z2_b) * s_mask
-                norm = jnp.linalg.norm(diff)
+                diff_zmat = (z1_b - z2_b) * s_mask
+                norm_zmat = jnp.linalg.norm(diff_zmat)
+
+                if use_complementary:
+                    # --- Complementary direction from snapshot ---
+                    wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                    half_size = n_walkers // 2
+                    my_half = walker_idx >= half_size
+                    comp_offset = jnp.where(my_half, 0, half_size)
+
+                    j_off = jax.random.randint(kc1, (), 0, half_size)
+                    k_off = jax.random.randint(kc2, (), 0, half_size)
+                    k_off = jnp.where(k_off == j_off, (k_off + 1) % half_size, k_off)
+                    j_idx = comp_offset + j_off
+                    k_idx = comp_offset + k_off
+
+                    c1_block = stream_pos_snapshot[j_idx, s_b_idx]
+                    c2_block = stream_pos_snapshot[k_idx, s_b_idx]
+                    diff_comp = (c1_block - c2_block) * s_mask
+                    norm_comp = jnp.linalg.norm(diff_comp)
+
+                    use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
+                    diff = jnp.where(use_comp, diff_comp, diff_zmat)
+                    norm = jnp.where(use_comp, norm_comp, norm_zmat)
+                else:
+                    diff = diff_zmat
+                    norm = norm_zmat
+
                 dim_corr = jnp.sqrt(jnp.float64(s_bsize) / 2.0)
                 mu_eff = s_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
