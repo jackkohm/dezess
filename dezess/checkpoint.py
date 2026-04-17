@@ -36,8 +36,11 @@ def save_checkpoint(path: str, result: dict) -> None:
         Result dict from run_variant or the raw dict underlying SampleResult.
         Must contain: samples, log_prob, mu, z_matrix.
     """
-    samples = np.asarray(result["samples"]) if "samples" in result else np.asarray(result.samples)
-    log_prob = np.asarray(result["log_prob"]) if "log_prob" in result else np.asarray(result.log_prob)
+    # Gather sharded arrays to host before converting to numpy
+    samples_raw = result["samples"] if "samples" in result else result.samples
+    log_prob_raw = result["log_prob"] if "log_prob" in result else result.log_prob
+    samples = np.asarray(jax.device_get(samples_raw))
+    log_prob = np.asarray(jax.device_get(log_prob_raw))
 
     # Get final walker positions (last production step)
     final_positions = samples[-1]  # (n_walkers, n_dim)
