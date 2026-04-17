@@ -79,6 +79,8 @@ def sample(
     verbose: bool = True,
     progress_fn: Optional[Callable] = None,
     transform: Optional[Transform] = None,
+    n_gpus: int = 1,
+    n_walkers_per_gpu: Optional[int] = None,
     **kwargs,
 ) -> SampleResult:
     """Draw posterior samples using dezess.
@@ -182,6 +184,8 @@ def sample(
         progress_fn=progress_fn,
         verbose=verbose,
         transform=transform,
+        n_gpus=n_gpus,
+        n_walkers_per_gpu=n_walkers_per_gpu,
         **kwargs,
     )
 
