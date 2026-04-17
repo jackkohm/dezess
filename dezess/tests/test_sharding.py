@@ -83,3 +83,34 @@ def test_init_positions_sharded_onto_mesh():
     assert sharded.sharding == sharding_info["walker_sharding"]
     addressable = sharded.addressable_data(0).shape
     assert addressable[0] == 32  # 64 / 2 = 32 per device
+
+
+def test_run_variant_n_gpus_2_recovers_gaussian_variance():
+    """End-to-end: 2-GPU run on 10D Gaussian recovers variance ~ 1.0."""
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+
+    if len(jax.devices()) < 2:
+        pytest.skip("Need >= 2 devices")
+
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x**2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (64, 10)) * 0.1
+
+    config = VariantConfig(
+        name="multi_gpu_test",
+        direction="de_mcz",
+        width="scale_aware",
+        slice_fn="fixed",
+        zmatrix="circular",
+        ensemble="standard",
+        check_nans=False,
+        width_kwargs={"scale_factor": 1.0},
+    )
+
+    result = run_variant(log_prob, init, n_steps=2000, config=config,
+                         n_warmup=1000, verbose=False,
+                         n_gpus=2, n_walkers_per_gpu=32)
+    samples = np.array(result["samples"])
+    flat = samples.reshape(-1, 10)
+    mean_var = float(np.var(flat, axis=0).mean())
+    assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"

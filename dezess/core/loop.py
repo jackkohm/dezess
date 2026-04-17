@@ -246,10 +246,41 @@ def run_variant(
     # All strategy-specific kwargs are captured as closure variables at trace time.
     # Python if-checks on config.direction/width/etc are resolved at trace time
     # (they are string constants), so no data-dependent branching inside JIT.
-    def _make_step_fn(n_exp, n_shr):
+    def _make_step_fn(n_exp, n_shr, sharding_info=None):
         """Create a JIT-compiled step function with given budget."""
 
-        @jax.jit
+        if sharding_info is not None:
+            walker_sh = sharding_info["walker_sharding"]
+            repl_sh = sharding_info["replicated"]
+            # Inputs (17 args): positions, log_probs are walker-sharded;
+            # z_padded, z_count, z_log_probs, mu, key are replicated;
+            # walker aux (4 fields) are walker-sharded;
+            # temperatures is walker-sharded;
+            # pca/flow/whitening/kde are replicated
+            in_shardings = (
+                walker_sh, walker_sh,                            # positions, log_probs
+                repl_sh, repl_sh, repl_sh,                       # z_padded, z_count, z_log_probs
+                repl_sh, repl_sh,                                # mu, key
+                walker_sh, walker_sh, walker_sh, walker_sh,      # 4 walker aux
+                walker_sh,                                       # temperatures
+                repl_sh, repl_sh, repl_sh, repl_sh, repl_sh,     # pca, flow, whitening, kde (5 args)
+            )
+            # Outputs (9): new_pos, new_lp, key_next, found, bracket_ratios,
+            # then 4 new walker aux fields
+            out_shardings = (
+                walker_sh, walker_sh,                            # new_pos, new_lp
+                repl_sh,                                         # key_next
+                walker_sh, walker_sh,                            # found, bracket_ratios
+                walker_sh, walker_sh, walker_sh, walker_sh,      # 4 new walker aux
+            )
+            jit_decorator = jax.jit(
+                in_shardings=in_shardings,
+                out_shardings=out_shardings,
+            )
+        else:
+            jit_decorator = jax.jit
+
+        @jit_decorator
         def parallel_step(positions, log_probs, z_padded, z_count, z_log_probs,
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
@@ -645,7 +676,7 @@ def run_variant(
         walker_aux_da = walker_aux.direction_anchor
         walker_aux_ds = walker_aux.direction_scale
     else:
-        step_fn = _make_step_fn(n_expand, n_shrink)
+        step_fn = _make_step_fn(n_expand, n_shrink, sharding_info=sharding_info)
         if verbose:
             print(f"  [{config.name}] JIT compiling...", flush=True)
         t_jit = time.time()
@@ -950,7 +981,7 @@ def run_variant(
     # Re-JIT if budget changed or PCA/flow directions updated
     # (skip for block-Gibbs which uses its own JIT-compiled step)
     if not use_block_gibbs and (needs_rejit or config.direction in ("pca", "flow", "whitened", "kde", "global_move")):
-        step_fn = _make_step_fn(n_expand, n_shrink)
+        step_fn = _make_step_fn(n_expand, n_shrink, sharding_info=sharding_info)
         if verbose:
             print(f"  [{config.name}] Re-JIT compiling for production...", flush=True)
         t_rejit = time.time()
