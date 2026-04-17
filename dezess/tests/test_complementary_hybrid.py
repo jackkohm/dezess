@@ -90,3 +90,52 @@ def test_complementary_prob_one_recovers_gaussian_variance():
     flat = samples.reshape(-1, 21)
     mean_var = float(np.var(flat, axis=0).mean())
     assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"
+
+
+def test_complementary_helps_with_biased_warmup():
+    """When warmup produces a biased Z-matrix, complementary_prob>0 shouldn't hurt."""
+    ndim = 10
+    rng = np.random.default_rng(42)
+    A = rng.standard_normal((ndim, ndim))
+    Q, _ = np.linalg.qr(A)
+    evals = np.linspace(1.0, 10.0, ndim)
+    cov = Q @ np.diag(evals) @ Q.T
+    cov = (cov + cov.T) / 2
+    prec = jnp.array(np.linalg.inv(cov), dtype=jnp.float64)
+
+    @jax.jit
+    def log_prob(x):
+        return -0.5 * x @ prec @ x
+
+    # Initialize FAR from the mean to bias the Z-matrix toward climb history
+    init = jax.random.normal(jax.random.PRNGKey(42), (32, ndim)) * 0.01 + 5.0
+
+    config_zmat = _make_bg_mh_dr_config(complementary_prob=0.0)
+    config_zmat = config_zmat._replace(
+        ensemble_kwargs={**config_zmat.ensemble_kwargs,
+                         "block_sizes": [5, 5]}
+    )
+    result_zmat = run_variant(
+        log_prob, init, n_steps=2000, config=config_zmat,
+        n_warmup=500, key=jax.random.PRNGKey(0), verbose=False,
+    )
+
+    config_hybrid = _make_bg_mh_dr_config(complementary_prob=0.5)
+    config_hybrid = config_hybrid._replace(
+        ensemble_kwargs={**config_hybrid.ensemble_kwargs,
+                         "block_sizes": [5, 5]}
+    )
+    result_hybrid = run_variant(
+        log_prob, init, n_steps=2000, config=config_hybrid,
+        n_warmup=500, key=jax.random.PRNGKey(0), verbose=False,
+    )
+
+    samples_zmat = np.array(result_zmat["samples"]).reshape(-1, ndim)
+    samples_hybrid = np.array(result_hybrid["samples"]).reshape(-1, ndim)
+
+    final_zmat_mean = np.linalg.norm(samples_zmat[-100:].mean(axis=0))
+    final_hybrid_mean = np.linalg.norm(samples_hybrid[-100:].mean(axis=0))
+
+    # Hybrid should not be dramatically worse than pure Z-matrix
+    assert final_hybrid_mean < final_zmat_mean + 1.0, \
+        f"hybrid={final_hybrid_mean:.2f}, zmat={final_zmat_mean:.2f}"
