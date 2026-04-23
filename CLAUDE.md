@@ -63,6 +63,14 @@ python bench_nurs.py
 
 `scale_aware` — DE-MCz directions + scale-aware width + fixed slice. Set in `dezess/core/loop.py:DEFAULT_CONFIG`.
 
+**`ensemble_kwargs["complementary_prob"]`** (0.0–1.0) enables the zeus-style
+complementary-pair fallback in **both** standard and block-Gibbs ensembles.
+With probability `complementary_prob` per step, the configured direction is
+replaced by a pair drawn from the OTHER half of the current walker positions
+(bypassing the Z-matrix). Use cp≈0.5 if you suspect biased Z-matrix from
+short warmup + biased init. cp=0.0 (default) is byte-identical to the legacy
+behavior.
+
 ### Key design constraints
 
 - **No while-loops** — use `lax.fori_loop` for JIT compatibility
