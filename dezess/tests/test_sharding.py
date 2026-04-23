@@ -147,3 +147,36 @@ def test_block_gibbs_mh_dr_sharded():
     flat = samples.reshape(-1, 21)
     mean_var = float(np.var(flat, axis=0).mean())
     assert 0.7 < mean_var < 1.3, f"mean_var={mean_var:.4f}, expected ~1.0"
+
+
+def test_cp_standard_multi_gpu_matches_single_gpu():
+    """cp=0.5 + standard ensemble: per-dim variance within 30% across 1 vs 2 GPUs."""
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+
+    if len(jax.devices()) < 2:
+        pytest.skip("Need >= 2 devices")
+
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (32, 5)) * 0.5
+
+    cfg = VariantConfig(
+        name="scale_aware_cp_smoke",
+        direction="de_mcz", width="scale_aware",
+        slice_fn="fixed", zmatrix="circular", ensemble="standard",
+        check_nans=False, width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={"complementary_prob": 0.5},
+    )
+
+    res_1 = run_variant(
+        log_prob, init, n_steps=600, config=cfg, n_warmup=100,
+        key=jax.random.PRNGKey(0), n_gpus=1, verbose=False,
+    )
+    res_2 = run_variant(
+        log_prob, init, n_steps=600, config=cfg, n_warmup=100,
+        key=jax.random.PRNGKey(0), n_gpus=2, n_walkers_per_gpu=16, verbose=False,
+    )
+    var_1 = np.array(res_1["samples"]).reshape(-1, 5).var(axis=0)
+    var_2 = np.array(res_2["samples"]).reshape(-1, 5).var(axis=0)
+    rel = np.abs(var_1 - var_2) / np.maximum(var_1, 1e-12)
+    assert rel.max() < 0.3, f"variance mismatch 1 vs 2 GPU: {rel}"
