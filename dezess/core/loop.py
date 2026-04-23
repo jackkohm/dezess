@@ -28,6 +28,7 @@ from dezess.transforms import Transform, identity
 
 # Direction modules
 from dezess.directions import de_mcz, snooker, pca, weighted_pair, momentum, riemannian, flow, whitened, gradient, coordinate, local_pair, kde_direction, global_move
+from dezess.directions.complementary import sample_complementary_pair
 # Width modules
 from dezess.width import scalar as scalar_width, stochastic as stochastic_width, per_direction
 from dezess.width import scale_aware as scale_aware_width, zeus_gamma as zeus_gamma_width
@@ -242,6 +243,21 @@ def run_variant(
     # KDE bandwidth: pre-initialize with ones (updated after warmup)
     kde_bandwidth = jnp.ones(n_dim, dtype=jnp.float64)
 
+    # --- Block-Gibbs / complementary parsing (moved earlier so both
+    # _make_step_fn and the block-Gibbs setup below see these flags) ---
+    use_block_gibbs = config.ensemble == "block_gibbs"
+    use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
+    use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
+    use_block_cov = use_block_mh and ens_kwargs.get("use_block_cov", False)
+    complementary_prob = float(ens_kwargs.get("complementary_prob", 0.0))
+    if not (0.0 <= complementary_prob <= 1.0):
+        raise ValueError(
+            f"complementary_prob must be in [0.0, 1.0], got {complementary_prob}"
+        )
+    use_complementary = complementary_prob > 0.0
+    conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
+    use_conditional = conditional_log_prob_fn is not None and use_block_mh
+
     # --- Build JIT-compiled step function ---
     # All strategy-specific kwargs are captured as closure variables at trace time.
     # Python if-checks on config.direction/width/etc are resolved at trace time
@@ -252,11 +268,12 @@ def run_variant(
         if sharding_info is not None:
             walker_sh = sharding_info["walker_sharding"]
             repl_sh = sharding_info["replicated"]
-            # Inputs (17 args): positions, log_probs are walker-sharded;
+            # Inputs (19 args): positions, log_probs are walker-sharded;
             # z_padded, z_count, z_log_probs, mu, key are replicated;
             # walker aux (4 fields) are walker-sharded;
             # temperatures is walker-sharded;
-            # pca/flow/whitening/kde are replicated
+            # pca/flow/whitening/kde are replicated;
+            # pos_snapshot is replicated, walker_indices is walker-sharded.
             in_shardings = (
                 walker_sh, walker_sh,                            # positions, log_probs
                 repl_sh, repl_sh, repl_sh,                       # z_padded, z_count, z_log_probs
@@ -264,6 +281,7 @@ def run_variant(
                 walker_sh, walker_sh, walker_sh, walker_sh,      # 4 walker aux
                 walker_sh,                                       # temperatures
                 repl_sh, repl_sh, repl_sh, repl_sh, repl_sh,     # pca, flow, whitening, kde (5 args)
+                repl_sh, walker_sh,                              # pos_snapshot, walker_indices
             )
             # Outputs (9): new_pos, new_lp, key_next, found, bracket_ratios,
             # then 4 new walker aux fields
@@ -287,64 +305,89 @@ def run_variant(
                           mu, key, walker_aux_prev_dir, walker_aux_bw,
                           walker_aux_d_anchor, walker_aux_d_scale,
                           temperatures, pca_components, pca_weights,
-                          flow_directions, whitening_matrix, kde_bandwidth):
+                          flow_directions, whitening_matrix, kde_bandwidth,
+                          pos_snapshot, walker_indices):
             keys = jax.random.split(key, n_walkers + 1)
             key_next = keys[0]
             walker_keys = keys[1:]
 
-            def update_one(x_i, lp_i, w_key, prev_d, bw, d_anchor, d_scale, temp):
+            def update_one(x_i, lp_i, w_key, prev_d, bw, d_anchor, d_scale, temp,
+                           walker_idx):
                 w_aux = WalkerAux(prev_direction=prev_d, bracket_widths=bw,
                                   direction_anchor=d_anchor,
                                   direction_scale=d_scale)
 
-                # Direction — strategy-specific kwargs resolved at trace time
+                # ── Direction: configured strategy ──────────────────────────────
                 if config.direction == "pca":
-                    d, w_key, w_aux = dir_mod.sample_direction(
+                    d_z, w_key, aux_z = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         pca_components=pca_components, pca_weights=pca_weights,
                         **dir_kwargs,
                     )
                 elif config.direction == "flow":
-                    d, w_key, w_aux = dir_mod.sample_direction(
+                    d_z, w_key, aux_z = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         flow_directions=flow_directions,
                         **dir_kwargs,
                     )
                 elif config.direction == "whitened":
-                    d, w_key, w_aux = dir_mod.sample_direction(
+                    d_z, w_key, aux_z = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         whitening_matrix=whitening_matrix,
                         **dir_kwargs,
                     )
                 elif config.direction == "kde":
-                    d, w_key, w_aux = dir_mod.sample_direction(
+                    d_z, w_key, aux_z = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         kde_bandwidth=kde_bandwidth,
                         **dir_kwargs,
                     )
                 else:
-                    d, w_key, w_aux = dir_mod.sample_direction(
+                    d_z, w_key, aux_z = dir_mod.sample_direction(
                         x_i, z_padded, z_count, z_log_probs, w_key, w_aux,
                         **dir_kwargs,
                     )
+
+                # ── Optional complementary fallback (gated by complementary_prob) ─
+                if use_complementary:
+                    # `sample_complementary_pair` is imported at module top.
+                    w_key, kc_choice, kc_pair = jax.random.split(w_key, 3)
+                    use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
+                    d_c, _, aux_c = sample_complementary_pair(
+                        x_i, pos_snapshot, walker_idx, kc_pair, w_aux,
+                    )
+                    d = jnp.where(use_comp, d_c, d_z)
+                    # Only swap direction_scale; keep the configured strategy's
+                    # prev_direction / bracket_widths / direction_anchor (some
+                    # are needed downstream by snooker / per_direction width).
+                    w_aux = aux_z._replace(
+                        direction_scale=jnp.where(
+                            use_comp, aux_c.direction_scale, aux_z.direction_scale
+                        ),
+                    )
+                    snooker_active = jnp.where(
+                        use_comp, jnp.float64(0.0), jnp.float64(1.0)
+                    )
+                else:
+                    d = d_z
+                    w_aux = aux_z
+                    snooker_active = jnp.float64(1.0)
 
                 # Width
                 w_key, k_width = jax.random.split(w_key)
                 mu_eff = width_mod.get_mu(mu, d, w_aux, key=k_width, **width_kwargs)
 
-                # Build slice log-density.
-                # For snooker: include Jacobian |x - anchor|^{d-1} so
-                # the 1D conditional in radial coords is correct.
+                # ── Slice log-density (snooker Jacobian gated by snooker_active) ─
                 if config.direction == "snooker":
                     z_anchor = w_aux.direction_anchor
                     ndim_j = x_i.shape[0]
                     def lp_fn(x):
                         base = lp_eval(log_prob_fn, x) / temp
                         dist = jnp.linalg.norm(x - z_anchor)
-                        return base + (ndim_j - 1) * jnp.log(jnp.maximum(dist, 1e-30))
+                        return base + snooker_active * (ndim_j - 1) * jnp.log(jnp.maximum(dist, 1e-30))
 
                     dist_0 = jnp.linalg.norm(x_i - z_anchor)
-                    lp_x_slice = lp_i / temp + (ndim_j - 1) * jnp.log(jnp.maximum(dist_0, 1e-30))
+                    lp_x_slice = lp_i / temp + snooker_active * (ndim_j - 1) * jnp.log(jnp.maximum(dist_0, 1e-30))
                 else:
                     def lp_fn(x):
                         return lp_eval(log_prob_fn, x) / temp
@@ -453,6 +496,7 @@ def run_variant(
                 positions, log_probs, walker_keys,
                 walker_aux_prev_dir, walker_aux_bw, walker_aux_d_anchor,
                 walker_aux_d_scale, temperatures,
+                walker_indices,                   # NEW: walker indices for complementary
             )
             (new_pos, new_lp, _, found, bracket_ratios,
              new_prev_dirs, new_bws, new_d_anchors, new_d_scales) = results
@@ -466,27 +510,26 @@ def run_variant(
                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                    walker_aux_ds, temperatures):
         """Helper to call step_fn with all required args including PCA/flow/whitening."""
+        # Always replicate pos_snapshot under sharding (whether or not cp > 0)
+        # to satisfy the in_shardings annotation. Cost on multi-GPU + cp=0 is
+        # one tiny all-gather (n_walkers × n_dim doubles ≈ 10 KB for Sanders),
+        # negligible vs. log-prob eval. Single-GPU has no overhead.
+        if sharding_info is not None:
+            pos_snapshot = jax.lax.with_sharding_constraint(
+                positions, sharding_info["replicated"]
+            )
+        else:
+            pos_snapshot = positions
+        walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
         return step_fn(
             positions, log_probs, z_padded, z_count, z_log_probs,
             mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
             walker_aux_ds, temperatures,
             pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+            pos_snapshot, walker_indices,
         )
 
     # --- Block-Gibbs setup ---
-    use_block_gibbs = config.ensemble == "block_gibbs"
-    use_block_mh = use_block_gibbs and ens_kwargs.get("use_mh", False)
-    use_delayed_rejection = use_block_mh and ens_kwargs.get("delayed_rejection", False)
-    use_block_cov = use_block_mh and ens_kwargs.get("use_block_cov", False)
-    complementary_prob = float(ens_kwargs.get("complementary_prob", 0.0))
-    if not (0.0 <= complementary_prob <= 1.0):
-        raise ValueError(
-            f"complementary_prob must be in [0.0, 1.0], got {complementary_prob}"
-        )
-    use_complementary = complementary_prob > 0.0
-    conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
-    use_conditional = conditional_log_prob_fn is not None and use_block_mh
-
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
         n_blocks_val = len(blocks)
@@ -1515,13 +1558,25 @@ def run_variant(
     use_scan = (config.ensemble not in ("parallel_tempering", "block_gibbs")) and not live_z
 
     if use_scan:
+        # Walker indices are static across all scan iterations.
+        _scan_walker_indices = jnp.arange(n_walkers, dtype=jnp.int32)
+
         @jax.jit
         def _scan_steps(carry, _):
             (pos, lps, k, pd, bw, da, ds) = carry
+            # Always replicate pos_snapshot under sharding (whether or not
+            # cp > 0) to satisfy the in_shardings annotation.
+            if sharding_info is not None:
+                pos_snapshot = jax.lax.with_sharding_constraint(
+                    pos, sharding_info["replicated"]
+                )
+            else:
+                pos_snapshot = pos
             (pos, lps, k, found, br, pd, bw, da, ds) = step_fn(
                 pos, lps, z_frozen, z_count_frozen, z_lp_frozen,
                 mu, k, pd, bw, da, ds, temperatures,
                 pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                pos_snapshot, _scan_walker_indices,
             )
             return (pos, lps, k, pd, bw, da, ds), (pos, lps, found, br)
 
@@ -1582,12 +1637,22 @@ def run_variant(
                 found = jnp.ones(n_walkers, dtype=jnp.bool_)
                 br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
             else:
+                # Always replicate pos_snapshot under sharding (whether or not
+                # cp > 0) to satisfy the in_shardings annotation.
+                if sharding_info is not None:
+                    pos_snapshot = jax.lax.with_sharding_constraint(
+                        positions, sharding_info["replicated"]
+                    )
+                else:
+                    pos_snapshot = positions
+                walker_indices_local = jnp.arange(n_walkers, dtype=jnp.int32)
                 (positions, log_probs, key, found, br,
                  walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
                     positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
                     mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
                     walker_aux_ds, temperatures,
                     pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                    pos_snapshot, walker_indices_local,
                 )
             if config.ensemble == "parallel_tempering":
                 key, k_swap = jax.random.split(key)
