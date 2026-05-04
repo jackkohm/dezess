@@ -121,6 +121,7 @@ def run_variant(
     transform: Optional[Transform] = None,
     n_gpus: int = 1,                          # NEW
     n_walkers_per_gpu: Optional[int] = None,  # NEW
+    skip_auto_extend_warmup: bool = False,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -1011,7 +1012,16 @@ def run_variant(
     # Warmup auto-extension: if ESJD is still changing rapidly or mu
     # hasn't stabilized, extend warmup by up to 2x the original length.
     # (Not used for block-Gibbs which has its own mu_blocks tuning.)
-    if tune and n_warmup > 100 and esjd_ema > 0 and not use_block_gibbs:
+    if skip_auto_extend_warmup and verbose:
+        print(f"  [{config.name}] Auto-extend warmup skipped (skip_auto_extend_warmup=True).",
+              flush=True)
+    if (
+        tune
+        and n_warmup > 100
+        and esjd_ema > 0
+        and not use_block_gibbs
+        and not skip_auto_extend_warmup
+    ):
         # Check: is mu still changing significantly between tune intervals?
         # Use the last bracket_ratio as a proxy — if it's far from target,
         # warmup hasn't converged.
