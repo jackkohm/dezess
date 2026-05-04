@@ -282,3 +282,37 @@ def test_stream_path_none_is_byte_identical_to_baseline(tmp_stream):
         np.asarray(res_baseline["samples"]),
         np.asarray(res_streamed["samples"]),
     )
+
+
+from dezess.streaming import resume_streaming
+
+
+def test_resume_streaming_continues_from_saved_state(tmp_stream):
+    """End-to-end: stream → simulated kill → resume → verify continuity."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (16, 4)) * 0.5
+    cfg = _scale_aware_cfg()
+
+    # First run
+    run_variant(
+        log_prob, init, n_steps=300, n_warmup=100,
+        config=cfg, key=jax.random.PRNGKey(0),
+        verbose=False, stream_path=str(tmp_stream),
+    )
+    out_first = read_streaming(tmp_stream)
+    assert out_first["samples"].shape == (200, 16, 4)
+
+    # Resume for 100 more steps. Pass `config` explicitly because the
+    # test variant isn't in the registry.
+    resume_streaming(
+        tmp_stream, log_prob,
+        n_more_steps=100, key=jax.random.PRNGKey(99), verbose=False,
+        config=cfg,
+    )
+    out_resumed = read_streaming(tmp_stream)
+    assert out_resumed["samples"].shape == (300, 16, 4)
+    np.testing.assert_array_equal(
+        out_resumed["samples"][:200], out_first["samples"][:200],
+    )
+    manifest = json.loads((tmp_stream / "manifest.json").read_text())
+    assert manifest["chunks"] == ["chunk_001", "chunk_002"]
