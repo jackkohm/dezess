@@ -122,6 +122,8 @@ def run_variant(
     n_gpus: int = 1,                          # NEW
     n_walkers_per_gpu: Optional[int] = None,  # NEW
     skip_auto_extend_warmup: bool = False,
+    stream_path: Optional[str] = None,
+    init_log_probs: Optional[Array] = None,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -808,12 +810,18 @@ def run_variant(
             return pos_out, lps_out, k_out, mean_br
 
     # --- Initial log-probs ---
-    if verbose:
-        print(f"  [{config.name}] Computing initial log-probs...", flush=True)
     positions = jnp.array(init_positions, dtype=jnp.float64)
     if sharding_info is not None:
         positions = jax.device_put(positions, sharding_info["walker_sharding"])
-    log_probs = jax.jit(jax.vmap(lambda x: lp_eval(log_prob_fn, x)))(positions)
+    if init_log_probs is not None:
+        log_probs = jnp.asarray(init_log_probs, dtype=jnp.float64)
+        if verbose:
+            print(f"  [{config.name}] Reusing supplied init log-probs (skip recompute)",
+                  flush=True)
+    else:
+        if verbose:
+            print(f"  [{config.name}] Computing initial log-probs...", flush=True)
+        log_probs = jax.jit(jax.vmap(lambda x: lp_eval(log_prob_fn, x)))(positions)
     log_probs.block_until_ready()
 
     # Populate initial Z log probs
@@ -1555,6 +1563,45 @@ def run_variant(
         print(f"  [{config.name}] Z-matrix {mode} at {int(z_count_frozen)} entries",
               flush=True)
 
+    # ── Streaming setup ────────────────────────────────────────────────
+    def _streaming_save_state(streamer, z_pad, z_lp, z_cnt, mu_val,
+                              w_pd, w_bw, w_da, w_ds, pos, lps,
+                              n_steps_done_in_chunk):
+        z_h = np.asarray(jax.device_get(z_pad))
+        zlp_h = np.asarray(jax.device_get(z_lp))
+        pos_h = np.asarray(jax.device_get(pos))
+        lps_h = np.asarray(jax.device_get(lps))
+        wkr_aux = {
+            "prev_direction": np.asarray(jax.device_get(w_pd)),
+            "bracket_widths": np.asarray(jax.device_get(w_bw)),
+            "direction_anchor": np.asarray(jax.device_get(w_da)),
+            "direction_scale": np.asarray(jax.device_get(w_ds)),
+        }
+        streamer.save_state(
+            z_matrix=z_h, z_log_probs=zlp_h,
+            z_count=int(np.asarray(jax.device_get(z_cnt))),
+            mu=float(np.asarray(jax.device_get(mu_val))),
+            walker_aux=wkr_aux,
+            last_positions=pos_h, last_lps=lps_h,
+            n_steps_done_in_chunk=int(n_steps_done_in_chunk),
+        )
+
+    streamer = None
+    if stream_path is not None:
+        from dezess.streaming import Streamer
+        streamer = Streamer(
+            stream_path,
+            n_walkers=n_walkers, n_dim=n_dim,
+            n_production=n_production,
+            config_name=config.name,
+            z_capacity=int(z_frozen.shape[0]),
+        )
+        streamer.open_chunk()
+        if verbose:
+            print(f"  [{config.name}] Streaming to {stream_path} "
+                  f"(chunk {streamer.chunk_idx:03d}, capacity {n_production})",
+                  flush=True)
+
     # Streaming diagnostics for live ESS/R-hat monitoring
     stream_diag = StreamingDiagnostics(n_walkers, n_dim)
 
@@ -1613,117 +1660,142 @@ def run_variant(
     t_prod = time.time()
     step_idx = 0
 
-    while step_idx < n_production:
-        # Determine batch size
-        remaining = n_production - step_idx
-        batch_sz = min(SCAN_BATCH, remaining) if use_scan else 1
+    try:
+        while step_idx < n_production:
+            # Determine batch size
+            remaining = n_production - step_idx
+            batch_sz = min(SCAN_BATCH, remaining) if use_scan else 1
 
-        if use_scan and batch_sz > 1:
-            # Batched scan
-            (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
-             walker_aux_da, walker_aux_ds,
-             batch_samples, batch_lps, batch_found, batch_br) = _run_batch(
-                positions, log_probs, key, walker_aux_pd, walker_aux_bw,
-                walker_aux_da, walker_aux_ds, batch_sz,
-            )
-            b_samples = np.asarray(batch_samples)
-            b_lps = np.asarray(batch_lps)
-            b_found = np.asarray(batch_found)
-            b_br = np.asarray(batch_br)
-            for i in range(batch_sz):
-                all_samples[step_idx + i] = b_samples[i]
-                all_log_probs[step_idx + i] = b_lps[i]
-                all_found[step_idx + i] = b_found[i]
-                all_bracket_ratios[step_idx + i] = b_br[i]
-                stream_diag.update(b_samples[i], b_lps[i])
-            step_idx += batch_sz
-        else:
-            # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
-            if use_block_gibbs:
-                positions, log_probs, key, br_mean = _block_step_fn(
-                    positions, log_probs, z_frozen, z_count_frozen,
-                    mu_blocks, key,
+            if use_scan and batch_sz > 1:
+                # Batched scan
+                (positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                 walker_aux_da, walker_aux_ds,
+                 batch_samples, batch_lps, batch_found, batch_br) = _run_batch(
+                    positions, log_probs, key, walker_aux_pd, walker_aux_bw,
+                    walker_aux_da, walker_aux_ds, batch_sz,
                 )
-                found = jnp.ones(n_walkers, dtype=jnp.bool_)
-                br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
-            else:
-                # Always replicate pos_snapshot under sharding (whether or not
-                # cp > 0) to satisfy the in_shardings annotation.
-                if sharding_info is not None:
-                    pos_snapshot = jax.lax.with_sharding_constraint(
-                        positions, sharding_info["replicated"]
+                b_samples = np.asarray(batch_samples)
+                b_lps = np.asarray(batch_lps)
+                b_found = np.asarray(batch_found)
+                b_br = np.asarray(batch_br)
+                for i in range(batch_sz):
+                    all_samples[step_idx + i] = b_samples[i]
+                    all_log_probs[step_idx + i] = b_lps[i]
+                    all_found[step_idx + i] = b_found[i]
+                    all_bracket_ratios[step_idx + i] = b_br[i]
+                    stream_diag.update(b_samples[i], b_lps[i])
+                if streamer is not None:
+                    streamer.append_batch(b_samples[:batch_sz], b_lps[:batch_sz])
+                    _streaming_save_state(
+                        streamer, z_frozen, z_lp_frozen, z_count_frozen, mu,
+                        walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds,
+                        positions, log_probs,
+                        n_steps_done_in_chunk=step_idx + batch_sz,
                     )
+                step_idx += batch_sz
+            else:
+                # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
+                if use_block_gibbs:
+                    positions, log_probs, key, br_mean = _block_step_fn(
+                        positions, log_probs, z_frozen, z_count_frozen,
+                        mu_blocks, key,
+                    )
+                    found = jnp.ones(n_walkers, dtype=jnp.bool_)
+                    br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
                 else:
-                    pos_snapshot = positions
-                walker_indices_local = jnp.arange(n_walkers, dtype=jnp.int32)
-                (positions, log_probs, key, found, br,
-                 walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
-                    positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
-                    mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
-                    walker_aux_ds, temperatures,
-                    pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
-                    pos_snapshot, walker_indices_local,
-                )
-            if config.ensemble == "parallel_tempering":
-                key, k_swap = jax.random.split(key)
-                positions, log_probs = parallel_tempering.propose_swaps(
-                    positions, log_probs, temperatures, k_swap,
-                    n_temps=ens_kwargs.get("n_temps", 4),
-                )
-            pos_np = np.asarray(positions)
-            all_samples[step_idx] = pos_np
-            all_log_probs[step_idx] = np.asarray(log_probs)
-            all_found[step_idx] = np.asarray(found)
-            all_bracket_ratios[step_idx] = np.asarray(br)
-            stream_diag.update(pos_np, np.asarray(log_probs))
+                    # Always replicate pos_snapshot under sharding (whether or not
+                    # cp > 0) to satisfy the in_shardings annotation.
+                    if sharding_info is not None:
+                        pos_snapshot = jax.lax.with_sharding_constraint(
+                            positions, sharding_info["replicated"]
+                        )
+                    else:
+                        pos_snapshot = positions
+                    walker_indices_local = jnp.arange(n_walkers, dtype=jnp.int32)
+                    (positions, log_probs, key, found, br,
+                     walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds) = step_fn(
+                        positions, log_probs, z_frozen, z_count_frozen, z_lp_frozen,
+                        mu, key, walker_aux_pd, walker_aux_bw, walker_aux_da,
+                        walker_aux_ds, temperatures,
+                        pca_components, pca_weights, flow_directions, whitening_matrix, kde_bandwidth,
+                        pos_snapshot, walker_indices_local,
+                    )
+                if config.ensemble == "parallel_tempering":
+                    key, k_swap = jax.random.split(key)
+                    positions, log_probs = parallel_tempering.propose_swaps(
+                        positions, log_probs, temperatures, k_swap,
+                        n_temps=ens_kwargs.get("n_temps", 4),
+                    )
+                pos_np = np.asarray(positions)
+                all_samples[step_idx] = pos_np
+                all_log_probs[step_idx] = np.asarray(log_probs)
+                all_found[step_idx] = np.asarray(found)
+                all_bracket_ratios[step_idx] = np.asarray(br)
+                stream_diag.update(pos_np, np.asarray(log_probs))
 
-            # Live Z-matrix: update archive during production
-            if live_z:
-                key, k_live = jax.random.split(key)
-                z_frozen, z_count_frozen, z_lp_frozen = live_zmatrix.append(
-                    z_frozen, z_count_frozen, z_lp_frozen,
-                    positions, log_probs, z_max_size,
-                    update_rate=live_update_rate, key=k_live,
-                )
+                # Live Z-matrix: update archive during production
+                if live_z:
+                    key, k_live = jax.random.split(key)
+                    z_frozen, z_count_frozen, z_lp_frozen = live_zmatrix.append(
+                        z_frozen, z_count_frozen, z_lp_frozen,
+                        positions, log_probs, z_max_size,
+                        update_rate=live_update_rate, key=k_live,
+                    )
 
-            step_idx += 1
+                if streamer is not None:
+                    # add leading step axis to satisfy append_batch's (k, n_walkers, n_dim) contract
+                    streamer.append_batch(pos_np[None, :, :], np.asarray(log_probs)[None, :])
+                    # save_state every 50 steps (or on final step) — single-step path
+                    # is PT/block-Gibbs/live-Z which are already slow; per-step state
+                    # save would dominate via 9x jax.device_get calls.
+                    if (step_idx + 1) % 50 == 0 or (step_idx + 1) == n_production:
+                        _streaming_save_state(
+                            streamer, z_frozen, z_lp_frozen, z_count_frozen, mu,
+                            walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds,
+                            positions, log_probs,
+                            n_steps_done_in_chunk=step_idx + 1,
+                        )
+                step_idx += 1
 
-        if verbose:
-            elapsed = time.time() - t_prod
-            speed = step_idx / elapsed if elapsed > 0 else 0
-            eta = (n_production - step_idx) / speed if speed > 0 else 0
-            best = float(all_log_probs[:step_idx].max())
-            mean_lp = float(all_log_probs[max(0,step_idx-200):step_idx].mean())
-            zero_rate = 1.0 - all_found[max(0,step_idx-200):step_idx].mean()
-            diag = stream_diag.summary()
-            print(f"  [{config.name}] {step_idx:6d}/{n_production} "
-                  f"({speed:.1f} it/s, ETA {eta:.0f}s) "
-                  f"best_lp={best:.1f} mean_lp={mean_lp:.1f} "
-                  f"zero_move={zero_rate:.4f} "
-                  f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
-                  flush=True)
+            if verbose:
+                elapsed = time.time() - t_prod
+                speed = step_idx / elapsed if elapsed > 0 else 0
+                eta = (n_production - step_idx) / speed if speed > 0 else 0
+                best = float(all_log_probs[:step_idx].max())
+                mean_lp = float(all_log_probs[max(0,step_idx-200):step_idx].mean())
+                zero_rate = 1.0 - all_found[max(0,step_idx-200):step_idx].mean()
+                diag = stream_diag.summary()
+                print(f"  [{config.name}] {step_idx:6d}/{n_production} "
+                      f"({speed:.1f} it/s, ETA {eta:.0f}s) "
+                      f"best_lp={best:.1f} mean_lp={mean_lp:.1f} "
+                      f"zero_move={zero_rate:.4f} "
+                      f"ESS={diag['ess_min']:.0f} rhat={diag['rhat_max']:.3f}",
+                      flush=True)
 
-        # Progress callback
-        if progress_fn is not None and step_idx % 50 < batch_sz:
-            elapsed = time.time() - t_prod
-            progress_fn({
-                "step": step_idx,
-                "n_steps": n_production,
-                "ess_min": stream_diag.ess_min(),
-                "rhat_max": stream_diag.rhat_max(),
-                "speed": step_idx / elapsed if elapsed > 0 else 0,
-            })
+            # Progress callback
+            if progress_fn is not None and step_idx % 50 < batch_sz:
+                elapsed = time.time() - t_prod
+                progress_fn({
+                    "step": step_idx,
+                    "n_steps": n_production,
+                    "ess_min": stream_diag.ess_min(),
+                    "rhat_max": stream_diag.rhat_max(),
+                    "speed": step_idx / elapsed if elapsed > 0 else 0,
+                })
 
-        # Early stopping: stop when target ESS is reached
-        if target_ess is not None and step_idx >= 100:
-            current_ess = stream_diag.ess_min()
-            if current_ess >= target_ess:
-                if verbose:
-                    print(f"  [{config.name}] Early stop: ESS={current_ess:.0f} >= "
-                          f"target={target_ess:.0f} at step {step_idx}/{n_production}",
-                          flush=True)
-                n_production = step_idx
-                break
+            # Early stopping: stop when target ESS is reached
+            if target_ess is not None and step_idx >= 100:
+                current_ess = stream_diag.ess_min()
+                if current_ess >= target_ess:
+                    if verbose:
+                        print(f"  [{config.name}] Early stop: ESS={current_ess:.0f} >= "
+                              f"target={target_ess:.0f} at step {step_idx}/{n_production}",
+                              flush=True)
+                    n_production = step_idx
+                    break
+    finally:
+        if streamer is not None:
+            streamer.close()
 
     wall_time = time.time() - t_prod
 

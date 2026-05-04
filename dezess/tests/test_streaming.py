@@ -216,3 +216,69 @@ def test_read_streaming_handles_partial_last_chunk(tmp_stream):
     # Sentinel must NOT have leaked into the result
     assert not np.any(out["samples"] == 99.0), \
         "truncation failed — rows beyond n_steps_done_in_chunk were returned"
+
+
+import jax
+import jax.numpy as jnp
+
+from dezess.core.loop import run_variant
+from dezess.core.types import VariantConfig
+
+jax.config.update("jax_enable_x64", True)
+
+
+def _scale_aware_cfg():
+    return VariantConfig(
+        name="stream_test",
+        direction="de_mcz", width="scale_aware",
+        slice_fn="fixed", zmatrix="circular", ensemble="standard",
+        check_nans=False, width_kwargs={"scale_factor": 1.0},
+    )
+
+
+def test_run_variant_with_stream_path_writes_to_disk(tmp_stream):
+    """run_variant(stream_path=...) writes samples to disk progressively."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (16, 4)) * 0.5
+
+    result = run_variant(
+        log_prob, init, n_steps=300, n_warmup=100,
+        config=_scale_aware_cfg(), key=jax.random.PRNGKey(0),
+        verbose=False, stream_path=str(tmp_stream),
+    )
+
+    # In-RAM result still works
+    assert result["samples"].shape == (200, 16, 4)
+
+    # Disk has the same data
+    out = read_streaming(tmp_stream)
+    assert out["samples"].shape == (200, 16, 4)
+    np.testing.assert_array_equal(np.asarray(result["samples"]), out["samples"])
+    np.testing.assert_array_equal(np.asarray(result["log_prob"]), out["log_probs"])
+
+    # State directory populated
+    state = tmp_stream / "state"
+    assert (state / "z_matrix.npy").exists()
+    assert (state / "mu.npy").exists()
+    assert (state / "last_positions.npy").exists()
+
+
+def test_stream_path_none_is_byte_identical_to_baseline(tmp_stream):
+    """stream_path=None must not change the in-RAM samples."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (16, 4)) * 0.5
+    cfg = _scale_aware_cfg()
+
+    res_baseline = run_variant(
+        log_prob, init, n_steps=200, n_warmup=50,
+        config=cfg, key=jax.random.PRNGKey(0), verbose=False,
+    )
+    res_streamed = run_variant(
+        log_prob, init, n_steps=200, n_warmup=50,
+        config=cfg, key=jax.random.PRNGKey(0), verbose=False,
+        stream_path=str(tmp_stream),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(res_baseline["samples"]),
+        np.asarray(res_streamed["samples"]),
+    )
