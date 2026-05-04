@@ -131,3 +131,88 @@ def test_streamer_overflow_raises(tmp_stream):
     s.append_batch(np.zeros((10, 4, 2)), np.zeros((10, 4)))   # fills
     with pytest.raises(ValueError, match="overflow"):
         s.append_batch(np.zeros((1, 4, 2)), np.zeros((1, 4)))
+
+
+from dezess.streaming import read_streaming
+
+
+def test_read_streaming_concatenates_chunks(tmp_stream):
+    """read_streaming returns the union of all chunks, truncated by steps_done."""
+    s = Streamer(tmp_stream, n_walkers=4, n_dim=2, n_production=10,
+                 config_name="cfg", z_capacity=8)
+    s.open_chunk()
+    s.append_batch(np.full((6, 4, 2), 1.0), np.full((6, 4), 1.0))
+    s.save_state(
+        z_matrix=np.zeros((8, 2)), z_log_probs=np.zeros((8,)), z_count=4, mu=0.5,
+        walker_aux={
+            "prev_direction": np.zeros((4, 2)),
+            "bracket_widths": np.zeros((4, 2)),
+            "direction_anchor": np.zeros((4, 2)),
+            "direction_scale": np.zeros((4,)),
+        },
+        last_positions=np.zeros((4, 2)), last_lps=np.zeros((4,)),
+        n_steps_done_in_chunk=6,
+    )
+    s.close()
+
+    s2 = Streamer(tmp_stream, n_walkers=4, n_dim=2, n_production=10,
+                  config_name="cfg", z_capacity=8)
+    s2.open_chunk()
+    s2.append_batch(np.full((4, 4, 2), 2.0), np.full((4, 4), 2.0))
+    s2.save_state(
+        z_matrix=np.zeros((8, 2)), z_log_probs=np.zeros((8,)), z_count=4, mu=0.5,
+        walker_aux={
+            "prev_direction": np.zeros((4, 2)),
+            "bracket_widths": np.zeros((4, 2)),
+            "direction_anchor": np.zeros((4, 2)),
+            "direction_scale": np.zeros((4,)),
+        },
+        last_positions=np.zeros((4, 2)), last_lps=np.zeros((4,)),
+        n_steps_done_in_chunk=4,
+    )
+    s2.close()
+
+    out = read_streaming(tmp_stream)
+    # 6 from chunk_001 + 4 from chunk_002 = 10
+    assert out["samples"].shape == (10, 4, 2)
+    np.testing.assert_array_equal(out["samples"][:6], 1.0)
+    np.testing.assert_array_equal(out["samples"][6:10], 2.0)
+    assert out["log_probs"].shape == (10, 4)
+    assert out["n_steps_total"] == 10
+    assert out["config_name"] == "cfg"
+
+
+def test_read_streaming_handles_partial_last_chunk(tmp_stream):
+    """If 5 rows are written but only 3 marked done before kill, return only 3."""
+    s = Streamer(tmp_stream, n_walkers=4, n_dim=2, n_production=10,
+                 config_name="cfg", z_capacity=8)
+    s.open_chunk()
+    # Write 5 rows: first 3 are 7.0, next 2 are SENTINEL 99.0 (must not appear in output)
+    samples = np.concatenate([
+        np.full((3, 4, 2), 7.0),
+        np.full((2, 4, 2), 99.0),
+    ], axis=0)
+    lps = np.concatenate([
+        np.full((3, 4), 7.0),
+        np.full((2, 4), 99.0),
+    ], axis=0)
+    s.append_batch(samples, lps)
+    # Mark only first 3 as done — simulates kill 2 rows after the last save_state
+    s.save_state(
+        z_matrix=np.zeros((8, 2)), z_log_probs=np.zeros((8,)), z_count=2, mu=0.5,
+        walker_aux={
+            "prev_direction": np.zeros((4, 2)),
+            "bracket_widths": np.zeros((4, 2)),
+            "direction_anchor": np.zeros((4, 2)),
+            "direction_scale": np.zeros((4,)),
+        },
+        last_positions=np.zeros((4, 2)), last_lps=np.zeros((4,)),
+        n_steps_done_in_chunk=3,
+    )
+    # NOTE: do NOT call s.close() — simulates kill mid-run
+    out = read_streaming(tmp_stream)
+    assert out["samples"].shape == (3, 4, 2)
+    np.testing.assert_array_equal(out["samples"], 7.0)
+    # Sentinel must NOT have leaked into the result
+    assert not np.any(out["samples"] == 99.0), \
+        "truncation failed — rows beyond n_steps_done_in_chunk were returned"

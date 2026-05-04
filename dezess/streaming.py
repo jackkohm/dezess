@@ -178,3 +178,44 @@ def _save_npy_atomic(path: Path, arr: np.ndarray) -> None:
     with open(tmp, "wb") as f:
         np.save(f, arr)
     os.replace(tmp, path)
+
+
+def read_streaming(stream_path: PathLike) -> dict:
+    """Read all completed chunks at `stream_path` and return a result dict.
+
+    Truncates each chunk to its recorded `steps_done_per_chunk` so partial
+    final chunks (kill mid-run) are not padded with the zero-init tail.
+
+    Returns a dict with keys: samples, log_probs, n_steps_total,
+    n_walkers, n_dim, config_name.
+    """
+    stream_path = Path(stream_path)
+    manifest = _read_manifest(stream_path)
+    chunks = manifest.get("chunks", [])
+    if not chunks:
+        raise FileNotFoundError(f"no chunks in manifest at {stream_path}")
+    per_chunk_done = manifest.get("steps_done_per_chunk", {})
+
+    samples_list: List[np.ndarray] = []
+    lps_list: List[np.ndarray] = []
+    for chunk_name in chunks:
+        chunk_dir = stream_path / chunk_name
+        # Steps done — fall back to full chunk length if not recorded
+        # (e.g. older chunk written without save_state at end)
+        s_full = np.load(chunk_dir / "samples.npy", mmap_mode="r")
+        lp_full = np.load(chunk_dir / "log_probs.npy", mmap_mode="r")
+        n_done = per_chunk_done.get(chunk_name, s_full.shape[0])
+        n_done = min(int(n_done), s_full.shape[0])
+        samples_list.append(np.asarray(s_full[:n_done]))
+        lps_list.append(np.asarray(lp_full[:n_done]))
+
+    samples = np.concatenate(samples_list, axis=0)
+    log_probs = np.concatenate(lps_list, axis=0)
+    return {
+        "samples": samples,
+        "log_probs": log_probs,
+        "n_steps_total": samples.shape[0],
+        "n_walkers": int(manifest["n_walkers"]),
+        "n_dim": int(manifest["n_dim"]),
+        "config_name": str(manifest.get("config_name", "")),
+    }
