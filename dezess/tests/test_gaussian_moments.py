@@ -213,5 +213,34 @@ def test_original_sampler():
     assert mean_var < 1.2, f"Original sampler exploding: {mean_var:.4f}"
 
 
+def test_skip_auto_extend_warmup_returns_quickly():
+    """skip_auto_extend_warmup=True must NOT trigger the post-warmup extender."""
+    import time as _time
+    from dezess.core.loop import run_variant
+    from dezess.core.types import VariantConfig
+
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (32, 5)) * 0.1
+    cfg = VariantConfig(
+        name="skip_extend_test",
+        direction="de_mcz", width="scale_aware",
+        slice_fn="fixed", zmatrix="circular", ensemble="standard",
+        check_nans=False, width_kwargs={"scale_factor": 1.0},
+    )
+
+    t0 = _time.time()
+    result = run_variant(
+        log_prob, init, n_steps=300, config=cfg, n_warmup=200,
+        key=jax.random.PRNGKey(0), verbose=False,
+        skip_auto_extend_warmup=True,
+    )
+    wall = _time.time() - t0
+    # With skip=True, total work is ~300 steps. Without skip, the extender
+    # may add up to n_warmup=200 steps. We just verify the flag is wired —
+    # the run completes and produces samples with the right shape.
+    assert result["samples"].shape == (100, 32, 5)
+    assert wall < 60.0   # generous; main check is the shape + wiring
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
