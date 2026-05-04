@@ -224,3 +224,92 @@ def read_streaming(stream_path: PathLike) -> dict:
         "n_dim": int(manifest["n_dim"]),
         "config_name": str(manifest.get("config_name", "")),
     }
+
+
+def resume_streaming(
+    stream_path: PathLike,
+    log_prob_fn,
+    n_more_steps: int,
+    key=None,
+    verbose: bool = True,
+    target_ess: Optional[float] = None,
+    config=None,
+) -> dict:
+    """Resume a streamed run for `n_more_steps` more production steps.
+
+    Reads sampler state from `<stream_path>/state/`, calls `run_variant`
+    with `n_warmup=0`, supplied `mu` / `z_initial` / `init_positions` /
+    `init_log_probs`, and `stream_path=stream_path` so the new samples
+    write to a new chunk. The Markov chain continues; auto-tuning is off.
+
+    Parameters
+    ----------
+    stream_path : str or Path
+        The directory written by a previous streaming run.
+    log_prob_fn : callable
+        Same log-prob function used in the original run.
+    n_more_steps : int
+        Number of additional production steps.
+    key : jax.random.PRNGKey, optional
+        PRNG key for the resumed run. Defaults to PRNGKey(0).
+    verbose : bool
+    target_ess : float, optional
+        Early stop threshold passed to run_variant.
+    config : VariantConfig, optional
+        Override the variant. If None, the variant is looked up in
+        dezess.benchmark.registry.VARIANTS using manifest["config_name"].
+
+    Returns
+    -------
+    dict — the resumed `run_variant` result.
+    """
+    import jax
+    import jax.numpy as jnp
+    from dezess.core.loop import run_variant
+
+    stream_path = Path(stream_path)
+    state = stream_path / "state"
+    if not (state / "last_positions.npy").exists():
+        raise FileNotFoundError(f"no state found at {state}")
+
+    manifest = _read_manifest(stream_path)
+    if config is None:
+        from dezess.benchmark.registry import VARIANTS
+        config_name = str(manifest.get("config_name", ""))
+        if config_name not in VARIANTS:
+            raise ValueError(
+                f"resume_streaming: config '{config_name}' not in registry. "
+                "Pass `config=...` to override."
+            )
+        config = VARIANTS[config_name]
+
+    init = np.load(state / "last_positions.npy")
+    init_lps = np.load(state / "last_lps.npy")
+    z_matrix = np.load(state / "z_matrix.npy")
+    mu_val = float(np.load(state / "mu.npy"))
+
+    if verbose:
+        per_chunk = manifest.get("steps_done_per_chunk", {})
+        n_done_total = sum(per_chunk.values())
+        print(f"dezess.resume_streaming: continuing from {n_done_total} steps "
+              f"(latest chunk: {manifest['chunks'][-1] if manifest.get('chunks') else 'n/a'}, "
+              f"mu={mu_val:.4f})", flush=True)
+
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
+    return run_variant(
+        log_prob_fn,
+        jnp.asarray(init, dtype=jnp.float64),
+        n_steps=int(n_more_steps),
+        n_warmup=0,
+        config=config,
+        key=key,
+        mu=mu_val,
+        tune=False,
+        z_initial=jnp.asarray(z_matrix, dtype=jnp.float64),
+        init_log_probs=jnp.asarray(init_lps, dtype=jnp.float64),
+        target_ess=target_ess,
+        verbose=verbose,
+        stream_path=str(stream_path),
+    )
