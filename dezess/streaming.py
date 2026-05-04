@@ -69,6 +69,11 @@ class Streamer:
         self._lps_mm: Optional[np.memmap] = None
         self._cursor = 0       # next row to write within this chunk
 
+    @property
+    def chunk_idx(self) -> Optional[int]:
+        """1-indexed chunk number assigned by open_chunk(); None before open_chunk()."""
+        return self._chunk_idx
+
     def open_chunk(self) -> None:
         """Allocate a new chunk_NNN/ with mmaps sized to `n_production`."""
         manifest = _read_manifest(self.stream_path)
