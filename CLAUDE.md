@@ -71,6 +71,26 @@ replaced by a pair drawn from the OTHER half of the current walker positions
 short warmup + biased init. cp=0.0 (default) is byte-identical to the legacy
 behavior.
 
+### Streaming-write + resume
+
+Long runs can stream samples + sampler state to disk during the run
+(one JIT compile, one execution) instead of saving at the end. Pass
+`stream_path="path/to/dir"` to `run_variant` (or `dezess.sample`).
+Samples accumulate in `path/to/dir/chunk_NNN/{samples,log_probs}.npy`
+as numpy memmaps; sampler state is overwritten atomically in
+`path/to/dir/state/`.
+
+Read while the run is in progress (or post-hoc) with
+`dezess.read_streaming(path)` — concatenates all chunks and returns
+`{samples, log_probs, n_steps_total, n_walkers, n_dim, config_name}`.
+
+Resume after a kill (or for more samples) with
+`dezess.resume_streaming(path, log_prob_fn, n_more_steps=N)` —
+reads the state, calls `run_variant` with `n_warmup=0` + the saved
+mu / z_matrix / positions, writes to a new chunk. The JIT compile
+hits the persistent cache (`JAX_COMPILATION_CACHE_DIR`) so resume
+is cheap.
+
 ### Key design constraints
 
 - **No while-loops** — use `lax.fori_loop` for JIT compatibility
