@@ -12,6 +12,7 @@ Disk layout::
             z_log_probs.npy
             z_count.npy
             mu.npy
+            mu_blocks.npy      (optional, written only for block_gibbs ensemble)
             walker_aux_prev_dir.npy
             walker_aux_bw.npy
             walker_aux_da.npy
@@ -130,6 +131,7 @@ class Streamer:
         last_positions: np.ndarray,
         last_lps: np.ndarray,
         n_steps_done_in_chunk: int,
+        mu_blocks: Optional[np.ndarray] = None,
     ) -> None:
         """Atomically overwrite the state/ directory with current sampler state."""
         state = self.stream_path / "state"
@@ -137,6 +139,8 @@ class Streamer:
         _save_npy_atomic(state / "z_log_probs.npy", z_log_probs)
         _save_npy_atomic(state / "z_count.npy", np.int64(z_count))
         _save_npy_atomic(state / "mu.npy", np.float64(mu))
+        if mu_blocks is not None:
+            _save_npy_atomic(state / "mu_blocks.npy", np.asarray(mu_blocks, dtype=np.float64))
         _save_npy_atomic(state / "walker_aux_prev_dir.npy", walker_aux["prev_direction"])
         _save_npy_atomic(state / "walker_aux_bw.npy", walker_aux["bracket_widths"])
         _save_npy_atomic(state / "walker_aux_da.npy", walker_aux["direction_anchor"])
@@ -287,6 +291,8 @@ def resume_streaming(
     init_lps = np.load(state / "last_lps.npy")
     z_matrix = np.load(state / "z_matrix.npy")
     mu_val = float(np.load(state / "mu.npy"))
+    mu_blocks_path = state / "mu_blocks.npy"
+    mu_blocks = np.load(mu_blocks_path) if mu_blocks_path.exists() else None
 
     if verbose:
         per_chunk = manifest.get("steps_done_per_chunk", {})
@@ -309,6 +315,7 @@ def resume_streaming(
         tune=False,
         z_initial=jnp.asarray(z_matrix, dtype=jnp.float64),
         init_log_probs=jnp.asarray(init_lps, dtype=jnp.float64),
+        mu_blocks_initial=jnp.asarray(mu_blocks, dtype=jnp.float64) if mu_blocks is not None else None,
         target_ess=target_ess,
         verbose=verbose,
         stream_path=str(stream_path),

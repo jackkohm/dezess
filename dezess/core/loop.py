@@ -124,6 +124,7 @@ def run_variant(
     skip_auto_extend_warmup: bool = False,
     stream_path: Optional[str] = None,
     init_log_probs: Optional[Array] = None,
+    mu_blocks_initial: Optional[Array] = None,
 ) -> dict:
     """Run a sampler variant composed from the given config.
 
@@ -536,7 +537,15 @@ def run_variant(
     if use_block_gibbs:
         blocks = block_gibbs.parse_blocks(ens_kwargs, n_dim)
         n_blocks_val = len(blocks)
-        mu_blocks = block_gibbs.init_mu_blocks(n_blocks_val, float(mu))
+        if mu_blocks_initial is not None:
+            mu_blocks = jnp.asarray(mu_blocks_initial, dtype=jnp.float64)
+            if mu_blocks.shape != (n_blocks_val,):
+                raise ValueError(
+                    f"mu_blocks_initial shape {mu_blocks.shape} does not match "
+                    f"n_blocks={n_blocks_val} for this config"
+                )
+        else:
+            mu_blocks = block_gibbs.init_mu_blocks(n_blocks_val, float(mu))
 
         # Pad blocks to same size for scan compatibility
         max_block_size = max(len(b) for b in blocks)
@@ -1566,7 +1575,8 @@ def run_variant(
     # ── Streaming setup ────────────────────────────────────────────────
     def _streaming_save_state(streamer, z_pad, z_lp, z_cnt, mu_val,
                               w_pd, w_bw, w_da, w_ds, pos, lps,
-                              n_steps_done_in_chunk):
+                              n_steps_done_in_chunk,
+                              mu_blocks_arg=None):
         z_h = np.asarray(jax.device_get(z_pad))
         zlp_h = np.asarray(jax.device_get(z_lp))
         pos_h = np.asarray(jax.device_get(pos))
@@ -1577,6 +1587,9 @@ def run_variant(
             "direction_anchor": np.asarray(jax.device_get(w_da)),
             "direction_scale": np.asarray(jax.device_get(w_ds)),
         }
+        mb_h = None
+        if mu_blocks_arg is not None:
+            mb_h = np.asarray(jax.device_get(mu_blocks_arg))
         streamer.save_state(
             z_matrix=z_h, z_log_probs=zlp_h,
             z_count=int(np.asarray(jax.device_get(z_cnt))),
@@ -1584,6 +1597,7 @@ def run_variant(
             walker_aux=wkr_aux,
             last_positions=pos_h, last_lps=lps_h,
             n_steps_done_in_chunk=int(n_steps_done_in_chunk),
+            mu_blocks=mb_h,
         )
 
     streamer = None
@@ -1691,6 +1705,7 @@ def run_variant(
                         walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds,
                         positions, log_probs,
                         n_steps_done_in_chunk=step_idx + batch_sz,
+                        mu_blocks_arg=mu_blocks if use_block_gibbs else None,
                     )
                 step_idx += batch_sz
             else:
@@ -1754,6 +1769,7 @@ def run_variant(
                             walker_aux_pd, walker_aux_bw, walker_aux_da, walker_aux_ds,
                             positions, log_probs,
                             n_steps_done_in_chunk=step_idx + 1,
+                            mu_blocks_arg=mu_blocks if use_block_gibbs else None,
                         )
                 step_idx += 1
 

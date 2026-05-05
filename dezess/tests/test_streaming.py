@@ -316,3 +316,55 @@ def test_resume_streaming_continues_from_saved_state(tmp_stream):
     )
     manifest = json.loads((tmp_stream / "manifest.json").read_text())
     assert manifest["chunks"] == ["chunk_001", "chunk_002"]
+
+
+def test_resume_streaming_preserves_block_gibbs_mu_blocks(tmp_stream):
+    """For block_gibbs ensembles, mu_blocks is saved+restored across resume.
+
+    Without the fix, scalar mu is saved and on resume mu_blocks is reset
+    to [mu, mu, ...], losing per-block tuning from warmup.
+    """
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (16, 6)) * 0.5
+    bg_cfg = VariantConfig(
+        name="bg_test",
+        direction="de_mcz", width="scale_aware",
+        slice_fn="fixed", zmatrix="circular", ensemble="block_gibbs",
+        check_nans=False, width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs={
+            "block_sizes": [2, 4],
+            "use_mh": True,
+            "delayed_rejection": True,
+            "complementary_prob": 0.5,
+        },
+    )
+
+    # First run: 100 prod steps with block-gibbs warmup tuning mu_blocks
+    res_first = run_variant(
+        log_prob, init, n_steps=200, n_warmup=100,
+        config=bg_cfg, key=jax.random.PRNGKey(0),
+        verbose=False, stream_path=str(tmp_stream),
+    )
+    saved_mu_blocks = np.asarray(res_first["mu_blocks"])
+    assert saved_mu_blocks.shape == (2,)
+
+    # mu_blocks.npy must exist on disk
+    assert (tmp_stream / "state" / "mu_blocks.npy").exists()
+    on_disk = np.load(tmp_stream / "state" / "mu_blocks.npy")
+    np.testing.assert_array_equal(on_disk, saved_mu_blocks)
+
+    # Resume — mu_blocks must be reconstructed from disk, not from scalar mu
+    res_resumed = resume_streaming(
+        tmp_stream, log_prob,
+        n_more_steps=50, key=jax.random.PRNGKey(99), verbose=False,
+        config=bg_cfg,
+    )
+    # The resumed run's INITIAL mu_blocks must match what was saved.
+    # We verify this by checking the resumed run completes successfully
+    # AND its FINAL mu_blocks (returned in result) is a valid (2,) array
+    # AND the saved-to-disk mu_blocks matches the END of the original chunk.
+    resumed_final_mu_blocks = np.asarray(res_resumed["mu_blocks"])
+    assert resumed_final_mu_blocks.shape == (2,)
+    # With tune=False (resume_streaming sets this), mu_blocks doesn't change
+    # during the resumed production run, so resumed_final == saved.
+    np.testing.assert_array_equal(resumed_final_mu_blocks, saved_mu_blocks)
