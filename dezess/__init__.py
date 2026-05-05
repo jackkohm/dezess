@@ -15,6 +15,7 @@ from dezess.utils import (
 from dezess.checkpoint import save_checkpoint, load_checkpoint, resume
 from dezess.tuning import recommend_walkers, estimate_n_steps
 from dezess.arviz_compat import to_inference_data
+from dezess.streaming import read_streaming, resume_streaming
 
 __all__ = [
     "sample",
@@ -42,4 +43,6 @@ __all__ = [
     "VariantConfig",
     "DEFAULT_CONFIG",
     "transforms",
+    "read_streaming",
+    "resume_streaming",
 ]
