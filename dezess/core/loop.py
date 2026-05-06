@@ -44,6 +44,11 @@ jax.config.update("jax_enable_x64", True)
 
 Array = jnp.ndarray
 
+# Braak (2008) optimal scaling for snooker MH on the 1D radial line.
+# γ ≈ 2.4/√2 ≈ 1.7. Used by the bg_MH+DR snooker proposal in block_mh_step
+# and block_conditional_step when ensemble_kwargs["snooker_prob"] > 0.
+SNOOKER_GAMMA = 1.7
+
 # Strategy registries
 DIRECTION_STRATEGIES = {
     "de_mcz": de_mcz,
@@ -265,6 +270,17 @@ def run_variant(
             f"gamma_jump_prob must be in [0.0, 1.0], got {gamma_jump_prob}"
         )
     use_gamma_jump = gamma_jump_prob > 0.0
+    snooker_prob = float(ens_kwargs.get("snooker_prob", 0.0))
+    if not (0.0 <= snooker_prob <= 1.0):
+        raise ValueError(
+            f"snooker_prob must be in [0.0, 1.0], got {snooker_prob}"
+        )
+    if complementary_prob + snooker_prob > 1.0 + 1e-9:
+        raise ValueError(
+            f"complementary_prob + snooker_prob must be ≤ 1.0, "
+            f"got cp={complementary_prob} + sp={snooker_prob}"
+        )
+    use_snooker = snooker_prob > 0.0
     conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
     use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
@@ -738,9 +754,23 @@ def run_variant(
                     diff_zmat = (z1_block - z2_block) * mask
                     norm_zmat = jnp.linalg.norm(diff_zmat)
 
+                    # --- Mixture-of-moves dice roll (single u, partitioned) ---
+                    # u in [0, cp): complementary direction (DE-MCz proposal)
+                    # u in [cp, cp+sp): snooker proposal
+                    # u in [cp+sp, 1): plain DE-MCz
+                    if use_complementary or use_snooker:
+                        wk, k_choose = jax.random.split(wk, 2)
+                        u_choose = jax.random.uniform(k_choose, dtype=jnp.float64)
+                        use_comp = u_choose < complementary_prob
+                        use_this_snooker = (u_choose >= complementary_prob) & \
+                                           (u_choose < complementary_prob + snooker_prob)
+                    else:
+                        use_comp = jnp.bool_(False)
+                        use_this_snooker = jnp.bool_(False)
+
                     if use_complementary:
                         # --- Complementary direction from snapshot ---
-                        wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                        wk, kc1, kc2 = jax.random.split(wk, 3)
                         half_size = n_walkers // 2
                         my_half = walker_idx >= half_size
                         comp_offset = jnp.where(my_half, 0, half_size)
@@ -756,14 +786,13 @@ def run_variant(
                         diff_comp = (c1_block - c2_block) * mask
                         norm_comp = jnp.linalg.norm(diff_comp)
 
-                        use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
                         diff = jnp.where(use_comp, diff_comp, diff_zmat)
                         norm = jnp.where(use_comp, norm_comp, norm_zmat)
                     else:
                         diff = diff_zmat
                         norm = norm_zmat
 
-                    # Scale-aware step
+                    # --- DE-MCz / complementary proposal (default branch) ---
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
 
@@ -776,19 +805,67 @@ def run_variant(
                         do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
                         mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
 
-                    # Full-space direction
                     d_block = diff / jnp.maximum(norm, 1e-30)
                     d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                     d_full = d_full.at[b_idx].add(d_block * mask)
+                    x_prop_demcz = x_full + mu_eff * d_full
 
-                    # Stage 1: full-scale proposal
-                    x_prop1 = x_full + mu_eff * d_full
+                    # --- Snooker proposal (block-restricted) — only when use_snooker ---
+                    # Braak (2008) snooker: anchor z_a, projection p = (x - z_a)/‖.‖,
+                    # step γ_snooker * (proj(z_p) - proj(z_q)) * p with γ ≈ 1.7.
+                    # Acceptance includes Jacobian (bsize-1) * log(‖x_new-z_a‖/‖x-z_a‖).
+                    if use_snooker:
+                        wk, ks_a, ks_p, ks_q = jax.random.split(wk, 4)
+                        idx_a = jax.random.randint(ks_a, (), 0, z_padded.shape[0]) % z_count
+                        idx_sp = jax.random.randint(ks_p, (), 0, z_padded.shape[0]) % z_count
+                        idx_sq = jax.random.randint(ks_q, (), 0, z_padded.shape[0]) % z_count
+                        idx_sp = jnp.where(idx_sp == idx_a, (idx_sp + 1) % z_count, idx_sp)
+                        idx_sq = jnp.where(idx_sq == idx_a, (idx_sq + 1) % z_count, idx_sq)
+                        idx_sq = jnp.where(idx_sq == idx_sp, (idx_sq + 1) % z_count, idx_sq)
+
+                        za_block = z_padded[idx_a, b_idx]
+                        zp_block = z_padded[idx_sp, b_idx]
+                        zq_block = z_padded[idx_sq, b_idx]
+
+                        x_block = x_full[b_idx]
+                        disp_block = (x_block - za_block) * mask
+                        disp_norm = jnp.linalg.norm(disp_block)
+                        safe_disp_norm = jnp.maximum(disp_norm, 1e-30)
+                        p_block = disp_block / safe_disp_norm
+
+                        y_p = jnp.sum(zp_block * p_block * mask)
+                        y_q = jnp.sum(zq_block * p_block * mask)
+                        snooker_step_block = SNOOKER_GAMMA * (y_p - y_q) * p_block
+
+                        snooker_step_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                        snooker_step_full = snooker_step_full.at[b_idx].add(snooker_step_block * mask)
+                        x_prop_snooker = x_full + snooker_step_full
+
+                        x_new_block = x_block + snooker_step_block
+                        disp_new = (x_new_block - za_block) * mask
+                        disp_new_norm = jnp.linalg.norm(disp_new)
+                        log_jac = (jnp.float64(bsize) - 1.0) * (
+                            jnp.log(jnp.maximum(disp_new_norm, 1e-30)) -
+                            jnp.log(jnp.maximum(disp_norm, 1e-30))
+                        )
+                        # Edge case: anchor coincides with current walker → reject
+                        too_close = disp_norm < 1e-12
+                        log_jac = jnp.where(too_close, -jnp.inf, log_jac)
+
+                        x_prop1 = jnp.where(use_this_snooker, x_prop_snooker, x_prop_demcz)
+                        snooker_log_jac = jnp.where(use_this_snooker, log_jac, jnp.float64(0.0))
+                    else:
+                        x_prop1 = x_prop_demcz
+                        snooker_log_jac = jnp.float64(0.0)
+
+                    # Stage 1: MH acceptance (with optional snooker Jacobian)
                     lp_prop1 = lp_eval(log_prob_fn, x_prop1)
                     log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
-                    accept1 = log_u1 < (lp_prop1 - lp)
+                    accept1 = log_u1 < (lp_prop1 - lp + snooker_log_jac)
 
                     if use_delayed_rejection:
-                        # Stage 2: smaller step, new DE direction
+                        # Stage 2: smaller step, new DE direction (no snooker — DR is the
+                        # small fallback; it stays as plain DE-MCz with reduced scale)
                         wk, k3, k4, k_accept2 = jax.random.split(wk, 4)
                         idx3 = jax.random.randint(k3, (), 0, z_padded.shape[0]) % z_count
                         idx4 = jax.random.randint(k4, (), 0, z_padded.shape[0]) % z_count
@@ -1411,9 +1488,19 @@ def run_variant(
                 diff_zmat = (z1_b - z2_b) * pot_mask
                 norm_zmat = jnp.linalg.norm(diff_zmat)
 
+                # Mixture-of-moves dice roll
+                if use_complementary or use_snooker:
+                    wk, k_choose = jax.random.split(wk, 2)
+                    u_choose = jax.random.uniform(k_choose, dtype=jnp.float64)
+                    use_comp = u_choose < complementary_prob
+                    use_this_snooker = (u_choose >= complementary_prob) & \
+                                       (u_choose < complementary_prob + snooker_prob)
+                else:
+                    use_comp = jnp.bool_(False)
+                    use_this_snooker = jnp.bool_(False)
+
                 if use_complementary:
-                    # --- Complementary direction from snapshot ---
-                    wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                    wk, kc1, kc2 = jax.random.split(wk, 3)
                     half_size = n_walkers // 2
                     my_half = walker_idx >= half_size
                     comp_offset = jnp.where(my_half, 0, half_size)
@@ -1429,7 +1516,6 @@ def run_variant(
                     diff_comp = (c1_block - c2_block) * pot_mask
                     norm_comp = jnp.linalg.norm(diff_comp)
 
-                    use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
                     diff = jnp.where(use_comp, diff_comp, diff_zmat)
                     norm = jnp.where(use_comp, norm_comp, norm_zmat)
                 else:
@@ -1439,9 +1525,6 @@ def run_variant(
                 dim_corr = jnp.sqrt(jnp.float64(pot_bsize) / 2.0)
                 mu_eff = pot_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
-                # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
-                # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
-                # — walker deposits onto another walker for cross-mode jumping.
                 if use_gamma_jump:
                     wk, kg = jax.random.split(wk, 2)
                     do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
@@ -1450,11 +1533,55 @@ def run_variant(
                 d_block = diff / jnp.maximum(norm, 1e-30)
                 d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                 d_full = d_full.at[pot_b_idx].add(d_block * pot_mask)
+                x_prop_demcz = x_full + mu_eff * d_full
 
-                x_prop = x_full + mu_eff * d_full
+                # --- Snooker proposal (block-restricted to potential block) ---
+                if use_snooker:
+                    wk, ks_a, ks_p, ks_q = jax.random.split(wk, 4)
+                    idx_a = jax.random.randint(ks_a, (), 0, z_padded.shape[0]) % z_count
+                    idx_sp = jax.random.randint(ks_p, (), 0, z_padded.shape[0]) % z_count
+                    idx_sq = jax.random.randint(ks_q, (), 0, z_padded.shape[0]) % z_count
+                    idx_sp = jnp.where(idx_sp == idx_a, (idx_sp + 1) % z_count, idx_sp)
+                    idx_sq = jnp.where(idx_sq == idx_a, (idx_sq + 1) % z_count, idx_sq)
+                    idx_sq = jnp.where(idx_sq == idx_sp, (idx_sq + 1) % z_count, idx_sq)
+
+                    za_block = z_padded[idx_a, pot_b_idx]
+                    zp_block = z_padded[idx_sp, pot_b_idx]
+                    zq_block = z_padded[idx_sq, pot_b_idx]
+
+                    x_block = x_full[pot_b_idx]
+                    disp_block = (x_block - za_block) * pot_mask
+                    disp_norm = jnp.linalg.norm(disp_block)
+                    safe_disp_norm = jnp.maximum(disp_norm, 1e-30)
+                    p_block = disp_block / safe_disp_norm
+
+                    y_p = jnp.sum(zp_block * p_block * pot_mask)
+                    y_q = jnp.sum(zq_block * p_block * pot_mask)
+                    snooker_step_block = SNOOKER_GAMMA * (y_p - y_q) * p_block
+
+                    snooker_step_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    snooker_step_full = snooker_step_full.at[pot_b_idx].add(snooker_step_block * pot_mask)
+                    x_prop_snooker = x_full + snooker_step_full
+
+                    x_new_block = x_block + snooker_step_block
+                    disp_new = (x_new_block - za_block) * pot_mask
+                    disp_new_norm = jnp.linalg.norm(disp_new)
+                    log_jac = (jnp.float64(pot_bsize) - 1.0) * (
+                        jnp.log(jnp.maximum(disp_new_norm, 1e-30)) -
+                        jnp.log(jnp.maximum(disp_norm, 1e-30))
+                    )
+                    too_close = disp_norm < 1e-12
+                    log_jac = jnp.where(too_close, -jnp.inf, log_jac)
+
+                    x_prop = jnp.where(use_this_snooker, x_prop_snooker, x_prop_demcz)
+                    snooker_log_jac = jnp.where(use_this_snooker, log_jac, jnp.float64(0.0))
+                else:
+                    x_prop = x_prop_demcz
+                    snooker_log_jac = jnp.float64(0.0)
+
                 lp_prop = lp_eval(log_prob_fn, x_prop)
                 log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
-                accept = log_u < (lp_prop - lp)
+                accept = log_u < (lp_prop - lp + snooker_log_jac)
                 x_new = jnp.where(accept, x_prop, x_full)
                 lp_new = jnp.where(accept, lp_prop, lp)
                 return x_new, lp_new, wk
@@ -1496,9 +1623,19 @@ def run_variant(
                 diff_zmat = (z1_b - z2_b) * s_mask
                 norm_zmat = jnp.linalg.norm(diff_zmat)
 
+                # Mixture-of-moves dice roll
+                if use_complementary or use_snooker:
+                    wk, k_choose = jax.random.split(wk, 2)
+                    u_choose = jax.random.uniform(k_choose, dtype=jnp.float64)
+                    use_comp = u_choose < complementary_prob
+                    use_this_snooker = (u_choose >= complementary_prob) & \
+                                       (u_choose < complementary_prob + snooker_prob)
+                else:
+                    use_comp = jnp.bool_(False)
+                    use_this_snooker = jnp.bool_(False)
+
                 if use_complementary:
-                    # --- Complementary direction from snapshot ---
-                    wk, kc1, kc2, kc_choice = jax.random.split(wk, 4)
+                    wk, kc1, kc2 = jax.random.split(wk, 3)
                     half_size = n_walkers // 2
                     my_half = walker_idx >= half_size
                     comp_offset = jnp.where(my_half, 0, half_size)
@@ -1514,7 +1651,6 @@ def run_variant(
                     diff_comp = (c1_block - c2_block) * s_mask
                     norm_comp = jnp.linalg.norm(diff_comp)
 
-                    use_comp = jax.random.uniform(kc_choice, dtype=jnp.float64) < complementary_prob
                     diff = jnp.where(use_comp, diff_comp, diff_zmat)
                     norm = jnp.where(use_comp, norm_comp, norm_zmat)
                 else:
@@ -1524,9 +1660,6 @@ def run_variant(
                 dim_corr = jnp.sqrt(jnp.float64(s_bsize) / 2.0)
                 mu_eff = s_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
-                # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
-                # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
-                # — walker deposits onto another walker for cross-mode jumping.
                 if use_gamma_jump:
                     wk, kg = jax.random.split(wk, 2)
                     do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
@@ -1535,15 +1668,58 @@ def run_variant(
                 d_block = diff / jnp.maximum(norm, 1e-30)
                 d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                 d_full = d_full.at[s_b_idx].add(d_block * s_mask)
+                x_prop_demcz = x_full + mu_eff * d_full
 
-                x_prop = x_full + mu_eff * d_full
+                # --- Snooker proposal (block-restricted to this stream block) ---
+                if use_snooker:
+                    wk, ks_a, ks_p, ks_q = jax.random.split(wk, 4)
+                    idx_a = jax.random.randint(ks_a, (), 0, z_padded.shape[0]) % z_count
+                    idx_sp = jax.random.randint(ks_p, (), 0, z_padded.shape[0]) % z_count
+                    idx_sq = jax.random.randint(ks_q, (), 0, z_padded.shape[0]) % z_count
+                    idx_sp = jnp.where(idx_sp == idx_a, (idx_sp + 1) % z_count, idx_sp)
+                    idx_sq = jnp.where(idx_sq == idx_a, (idx_sq + 1) % z_count, idx_sq)
+                    idx_sq = jnp.where(idx_sq == idx_sp, (idx_sq + 1) % z_count, idx_sq)
+
+                    za_block = z_padded[idx_a, s_b_idx]
+                    zp_block = z_padded[idx_sp, s_b_idx]
+                    zq_block = z_padded[idx_sq, s_b_idx]
+
+                    x_block = x_full[s_b_idx]
+                    disp_block = (x_block - za_block) * s_mask
+                    disp_norm = jnp.linalg.norm(disp_block)
+                    safe_disp_norm = jnp.maximum(disp_norm, 1e-30)
+                    p_block = disp_block / safe_disp_norm
+
+                    y_p = jnp.sum(zp_block * p_block * s_mask)
+                    y_q = jnp.sum(zq_block * p_block * s_mask)
+                    snooker_step_block = SNOOKER_GAMMA * (y_p - y_q) * p_block
+
+                    snooker_step_full = jnp.zeros(n_dim, dtype=jnp.float64)
+                    snooker_step_full = snooker_step_full.at[s_b_idx].add(snooker_step_block * s_mask)
+                    x_prop_snooker = x_full + snooker_step_full
+
+                    x_new_block = x_block + snooker_step_block
+                    disp_new = (x_new_block - za_block) * s_mask
+                    disp_new_norm = jnp.linalg.norm(disp_new)
+                    log_jac = (jnp.float64(s_bsize) - 1.0) * (
+                        jnp.log(jnp.maximum(disp_new_norm, 1e-30)) -
+                        jnp.log(jnp.maximum(disp_norm, 1e-30))
+                    )
+                    too_close = disp_norm < 1e-12
+                    log_jac = jnp.where(too_close, -jnp.inf, log_jac)
+
+                    x_prop = jnp.where(use_this_snooker, x_prop_snooker, x_prop_demcz)
+                    snooker_log_jac = jnp.where(use_this_snooker, log_jac, jnp.float64(0.0))
+                else:
+                    x_prop = x_prop_demcz
+                    snooker_log_jac = jnp.float64(0.0)
 
                 # Conditional log_prob for MH ratio
                 cond_lp_old = conditional_log_prob_fn(x_full, stream_idx)
                 cond_lp_new = conditional_log_prob_fn(x_prop, stream_idx)
 
                 log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
-                accept = log_u < (cond_lp_new - cond_lp_old)
+                accept = log_u < (cond_lp_new - cond_lp_old + snooker_log_jac)
                 return x_prop, accept
 
             def _update_all_streams_one_walker(x_full, wk, walker_idx):
