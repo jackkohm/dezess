@@ -108,6 +108,34 @@ Slice-based ensembles (standard, parallel_tempering) ignore this knob —
 they shrink the slice to find a valid point, which can't cross
 low-density barriers regardless of bracket width.
 
+### Snooker (Braak 2008) for block-Gibbs MH+DR
+
+`ensemble_kwargs["snooker_prob"]` (0.0–1.0) — Braak (2008) snooker
+proposal as a mixture-of-moves option for the block-Gibbs MH+DR path
+(`block_mh_step` and `block_conditional_step`). With probability
+`snooker_prob` per step, the proposal is constructed in the block
+subspace as `x + γ_snooker * (proj_p(z_p) - proj_p(z_q)) * p` where
+`p = (x - z_a) / ‖.‖` is the projection direction through anchor
+`z_a` and `γ_snooker = 1.7` (Braak optimum, 1D radial line).
+
+The MH acceptance includes the snooker Jacobian
+`(bsize - 1) * log(‖x_new - z_a‖ / ‖x - z_a‖)` using the BLOCK
+dimension — critical for correctness in block-Gibbs.
+
+Mixture semantics (single dice roll, partitioned):
+- `u < complementary_prob` → complementary direction (DE-MCz proposal)
+- `complementary_prob ≤ u < complementary_prob + snooker_prob` → snooker
+- `u ≥ complementary_prob + snooker_prob` → plain DE-MCz
+
+`complementary_prob + snooker_prob ≤ 1.0` is enforced; otherwise
+ValueError. Stage-1 only — DR's stage-2 stays as DE-MCz fallback.
+Snooker is the right tool when block-Gibbs mixing is slow due to
+**cross-block correlations** (a cluster of correlated dims spread
+across blocks). For your bg_MH+DR Sanders setup, try `snooker_prob=0.1`
+when `log_10 M ↔ stream-nuisance` correlations exceed ~0.5.
+
+`snooker_prob=0.0` (default) is byte-identical to legacy behavior.
+
 ### Key design constraints
 
 - **No while-loops** — use `lax.fori_loop` for JIT compatibility
