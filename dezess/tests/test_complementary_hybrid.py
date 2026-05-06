@@ -139,3 +139,68 @@ def test_complementary_helps_with_biased_warmup():
     # Hybrid should not be dramatically worse than pure Z-matrix
     assert final_hybrid_mean < final_zmat_mean + 1.0, \
         f"hybrid={final_hybrid_mean:.2f}, zmat={final_zmat_mean:.2f}"
+
+
+def _make_bg_mh_dr_gamma_config(complementary_prob=0.0, gamma_jump_prob=0.0):
+    """bg_MH+DR config with optional cp + gamma_jump."""
+    ens_kwargs = {
+        "block_sizes": [7, 14],
+        "use_mh": True,
+        "delayed_rejection": True,
+    }
+    if complementary_prob > 0.0:
+        ens_kwargs["complementary_prob"] = complementary_prob
+    if gamma_jump_prob > 0.0:
+        ens_kwargs["gamma_jump_prob"] = gamma_jump_prob
+    return VariantConfig(
+        name=f"bg_mh_dr_cp{complementary_prob}_gj{gamma_jump_prob}",
+        direction="de_mcz", width="scale_aware",
+        slice_fn="fixed", zmatrix="circular", ensemble="block_gibbs",
+        check_nans=False, width_kwargs={"scale_factor": 1.0},
+        ensemble_kwargs=ens_kwargs,
+    )
+
+
+def test_gamma_jump_zero_matches_baseline_bg_mh_dr():
+    """gamma_jump_prob=0.0 must produce byte-identical samples to current bg_MH+DR."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(42), (32, 21)) * 0.1
+
+    res_explicit = run_variant(
+        log_prob, init, n_steps=300,
+        config=_make_bg_mh_dr_gamma_config(complementary_prob=0.0, gamma_jump_prob=0.0),
+        n_warmup=100, key=jax.random.PRNGKey(0), verbose=False,
+    )
+    res_default = run_variant(
+        log_prob, init, n_steps=300,
+        config=_make_bg_mh_dr_config(complementary_prob=0.0),  # uses original helper
+        n_warmup=100, key=jax.random.PRNGKey(0), verbose=False,
+    )
+
+    np.testing.assert_array_equal(
+        np.array(res_explicit["samples"]),
+        np.array(res_default["samples"]),
+        err_msg="gamma_jump_prob=0.0 must be byte-identical to baseline bg_MH+DR",
+    )
+
+
+@pytest.mark.parametrize("gj", [0.05, 0.10])
+def test_gamma_jump_recovers_gaussian_variance(gj):
+    """gamma_jump_prob > 0 with bg_MH+DR must still recover unit Gaussian variance."""
+    log_prob = jax.jit(lambda x: -0.5 * jnp.sum(x ** 2))
+    init = jax.random.normal(jax.random.PRNGKey(0), (64, 21)) * 0.5
+
+    result = run_variant(
+        log_prob, init, n_steps=2000,
+        config=_make_bg_mh_dr_gamma_config(complementary_prob=0.5, gamma_jump_prob=gj),
+        n_warmup=500, key=jax.random.PRNGKey(0), verbose=False,
+    )
+    samples = np.array(result["samples"]).reshape(-1, 21)
+    emp_var = samples.var(axis=0)
+    rel_err = np.abs(emp_var - 1.0)
+    # Tolerance reflects production-relevant gj values (0.05–0.10). Higher gj
+    # would inject more rejected proposals and need a looser bound.
+    assert rel_err.max() < 0.25, (
+        f"gj={gj}: worst per-dim variance error {rel_err.max():.2%} > 25%; "
+        f"emp_var={emp_var}"
+    )
