@@ -91,6 +91,23 @@ mu / z_matrix / positions, writes to a new chunk. The JIT compile
 hits the persistent cache (`JAX_COMPILATION_CACHE_DIR`) so resume
 is cheap.
 
+### γ-jump for block-Gibbs MH+DR mode-jumping
+
+`ensemble_kwargs["gamma_jump_prob"]` (0.0–1.0) — Braak (2006) γ=1
+mode-jumping for the block-Gibbs MH+DR path. With probability
+`gamma_jump_prob` per step, the proposal magnitude is overridden to
+land directly on another walker (`x_prop = x + (z_j - z_k)` instead of
+the diffusion-optimal `x + (mu_b/sqrt(bsize/2)) * (z_j - z_k)`). MH
+accept/reject decides if it lands in another mode. Composes with
+`complementary_prob` (gamma jump applies to whichever direction was
+selected). Stage-1 only — DR's stage-2 fallback is unaffected. Typical
+production values 0.05–0.10. gamma_jump_prob=0.0 default is byte-identical
+to legacy behavior.
+
+Slice-based ensembles (standard, parallel_tempering) ignore this knob —
+they shrink the slice to find a valid point, which can't cross
+low-density barriers regardless of bracket width.
+
 ### Key design constraints
 
 - **No while-loops** — use `lax.fori_loop` for JIT compatibility

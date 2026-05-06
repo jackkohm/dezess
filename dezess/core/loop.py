@@ -259,6 +259,12 @@ def run_variant(
             f"complementary_prob must be in [0.0, 1.0], got {complementary_prob}"
         )
     use_complementary = complementary_prob > 0.0
+    gamma_jump_prob = float(ens_kwargs.get("gamma_jump_prob", 0.0))
+    if not (0.0 <= gamma_jump_prob <= 1.0):
+        raise ValueError(
+            f"gamma_jump_prob must be in [0.0, 1.0], got {gamma_jump_prob}"
+        )
+    use_gamma_jump = gamma_jump_prob > 0.0
     conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
     use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
@@ -644,6 +650,14 @@ def run_variant(
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
 
+                    # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
+                    # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
+                    # — walker deposits onto another walker for cross-mode jumping.
+                    if use_gamma_jump:
+                        wk, kg = jax.random.split(wk, 2)
+                        do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
+                        mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
+
                     # Slice sample — dispatch to configured slice strategy
                     if config.slice_fn == "nurs":
                         x_new, lp_new, wk, found, L, R = nurs_slice.execute(
@@ -752,6 +766,15 @@ def run_variant(
                     # Scale-aware step
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
+
+                    # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
+                    # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
+                    # — walker deposits onto another walker for cross-mode jumping.
+                    # Stage-1 only — DR's stage-2 fallback is unaffected.
+                    if use_gamma_jump:
+                        wk, kg = jax.random.split(wk, 2)
+                        do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
+                        mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
 
                     # Full-space direction
                     d_block = diff / jnp.maximum(norm, 1e-30)
@@ -1276,6 +1299,15 @@ def run_variant(
                     dim_corr = jnp.sqrt(jnp.float64(bsize) / 2.0)
                     mu_eff = mu_b * norm / jnp.maximum(dim_corr, 1e-30)
 
+                    # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
+                    # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
+                    # — walker deposits onto another walker for cross-mode jumping.
+                    # Stage-1 only — DR's stage-2 fallback is unaffected.
+                    if use_gamma_jump:
+                        wk, kg = jax.random.split(wk, 2)
+                        do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
+                        mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
+
                     d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                     d_full = d_full.at[b_idx].add(d_block * mask)
 
@@ -1407,6 +1439,14 @@ def run_variant(
                 dim_corr = jnp.sqrt(jnp.float64(pot_bsize) / 2.0)
                 mu_eff = pot_mu * norm / jnp.maximum(dim_corr, 1e-30)
 
+                # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
+                # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
+                # — walker deposits onto another walker for cross-mode jumping.
+                if use_gamma_jump:
+                    wk, kg = jax.random.split(wk, 2)
+                    do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
+                    mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
+
                 d_block = diff / jnp.maximum(norm, 1e-30)
                 d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                 d_full = d_full.at[pot_b_idx].add(d_block * pot_mask)
@@ -1483,6 +1523,14 @@ def run_variant(
 
                 dim_corr = jnp.sqrt(jnp.float64(s_bsize) / 2.0)
                 mu_eff = s_mu * norm / jnp.maximum(dim_corr, 1e-30)
+
+                # γ=1 mode-jump (Braak 2006): with prob `gamma_jump_prob`,
+                # override mu_eff = norm so x_prop = x + 1.0 * (z_j - z_k)
+                # — walker deposits onto another walker for cross-mode jumping.
+                if use_gamma_jump:
+                    wk, kg = jax.random.split(wk, 2)
+                    do_gamma_jump = jax.random.uniform(kg, dtype=jnp.float64) < gamma_jump_prob
+                    mu_eff = jnp.where(do_gamma_jump, norm, mu_eff)
 
                 d_block = diff / jnp.maximum(norm, 1e-30)
                 d_full = jnp.zeros(n_dim, dtype=jnp.float64)
