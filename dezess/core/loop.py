@@ -721,8 +721,7 @@ def run_variant(
             (pos_out, lps_out, k_out), all_br = jax.lax.scan(
                 _one_block, (positions, log_probs, k), block_data,
             )
-            mean_br = jnp.mean(all_br)
-            return pos_out, lps_out, k_out, mean_br
+            return pos_out, lps_out, k_out, all_br
 
         # --- Block-Gibbs MH: 1 eval per block instead of ~10 for slice ---
         @block_jit
@@ -915,8 +914,7 @@ def run_variant(
             (pos_out, lps_out, k_out), all_br = jax.lax.scan(
                 _one_block_mh, (positions, log_probs, k), block_data,
             )
-            mean_br = jnp.mean(all_br)
-            return pos_out, lps_out, k_out, mean_br
+            return pos_out, lps_out, k_out, all_br
 
     # --- Initial log-probs ---
     positions = jnp.array(init_positions, dtype=jnp.float64)
@@ -992,6 +990,8 @@ def run_variant(
     TARGET_RATIO = float(n_expand + 1)
     MU_MIN, MU_MAX = 1e-8, 1e6
     ratio_ema = TARGET_RATIO
+    if use_block_gibbs:
+        ratio_ema_blocks = jnp.full(n_blocks_val, TARGET_RATIO, dtype=jnp.float64)
     cap_hit_counts = 0
     total_samples_warmup = 0
 
@@ -1019,10 +1019,11 @@ def run_variant(
     t_sample = time.time()
     for step in range(n_warmup):
         if use_block_gibbs:
-            # Block-Gibbs warmup step
-            positions, log_probs, key, br_mean = _block_step_fn(
+            # Block-Gibbs warmup step — returns per-block bracket ratios
+            positions, log_probs, key, br_per_block = _block_step_fn(
                 positions, log_probs, z_padded, z_count, mu_blocks, key,
             )
+            br_mean = float(jnp.mean(br_per_block))
             # Fake found/br for compatibility with downstream code
             found = jnp.ones(n_walkers, dtype=jnp.bool_)
             br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
@@ -1075,13 +1076,20 @@ def run_variant(
         # Tune mu (or mu_blocks for block-Gibbs)
         if tune and (step + 1) % TUNE_INTERVAL == 0:
             if use_block_gibbs:
-                # Scale all mu_blocks by the same bracket-ratio adjustment
-                med_ratio = float(jnp.median(br))
-                ratio_ema = 0.3 * med_ratio + 0.7 * ratio_ema
-                if ratio_ema > 0:
-                    adjustment = (ratio_ema / TARGET_RATIO) ** 0.5
-                    mu_blocks = jnp.clip(mu_blocks * adjustment, MU_MIN, MU_MAX)
-                    mu = jnp.float64(jnp.mean(mu_blocks))
+                # Per-block bracket-ratio tuning: each block adapts its own mu
+                # independently. br_per_block (shape: n_blocks) is already per-block
+                # (averaged over walkers inside the scan). This is critical for
+                # block partitions with very different scales (e.g., 7-dim potential
+                # vs 44-dim nuisance).
+                ratio_ema_blocks = 0.3 * br_per_block + 0.7 * ratio_ema_blocks
+                adjustments = jnp.where(
+                    ratio_ema_blocks > 0,
+                    (ratio_ema_blocks / TARGET_RATIO) ** 0.5,
+                    jnp.float64(1.0),
+                )
+                mu_blocks = jnp.clip(mu_blocks * adjustments, MU_MIN, MU_MAX)
+                mu = jnp.float64(jnp.mean(mu_blocks))
+                ratio_ema = float(jnp.mean(ratio_ema_blocks))
             elif config.tune_method == "esjd":
                 if esjd_ema > best_esjd:
                     best_esjd = esjd_ema
@@ -1441,8 +1449,7 @@ def run_variant(
             (pos_out, lps_out, k_out), all_br = jax.lax.scan(
                 _one_block_mh, (positions, log_probs, k), block_data,
             )
-            mean_br = jnp.mean(all_br)
-            return pos_out, lps_out, k_out, mean_br
+            return pos_out, lps_out, k_out, all_br
 
         _block_step_fn = block_mh_cov_step
 
@@ -1935,12 +1942,13 @@ def run_variant(
             else:
                 # Single step (fallback for parallel tempering, block-Gibbs, or last batch)
                 if use_block_gibbs:
-                    positions, log_probs, key, br_mean = _block_step_fn(
+                    positions, log_probs, key, br_per_block_prod = _block_step_fn(
                         positions, log_probs, z_frozen, z_count_frozen,
                         mu_blocks, key,
                     )
                     found = jnp.ones(n_walkers, dtype=jnp.bool_)
-                    br = jnp.full(n_walkers, br_mean, dtype=jnp.float64)
+                    br = jnp.full(n_walkers, float(jnp.mean(br_per_block_prod)),
+                                  dtype=jnp.float64)
                 else:
                     # Always replicate pos_snapshot under sharding (whether or not
                     # cp > 0) to satisfy the in_shardings annotation.
