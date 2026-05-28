@@ -27,7 +27,7 @@ print(f"JAX devices: {jax.devices()}")
 POT_DIM = 7
 NUIS_DIM = 44
 NDIM = POT_DIM + NUIS_DIM
-N_WALKERS = 64
+N_WALKERS = 128   # zeus requires ≥ 2*ndim walkers (= 102 for 51D)
 N_WARMUP = 1000
 N_PROD = 20000
 N_SEEDS = 3
