@@ -281,6 +281,14 @@ def run_variant(
             f"got cp={complementary_prob} + sp={snooker_prob}"
         )
     use_snooker = snooker_prob > 0.0
+    # lp_dead: any proposal with lp_prop <= lp_dead OR non-finite lp_prop /
+    # Jacobian is auto-rejected. Makes the infeasibility floor *reflecting*
+    # instead of absorbing — stops the snooker (bsize-1)*log(r) outward pump
+    # from running walkers off to infinity once they touch the floor, and
+    # closes the +inf-Jacobian entry path. Applied to all block-MH paths
+    # (block_mh_step, block_mh_cov_step, block_conditional_step). Default
+    # -1e6 catches the common -1e7 / -1e8 infeasibility floors.
+    lp_dead = float(ens_kwargs.get("lp_dead", -1e6))
     conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
     use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
@@ -857,10 +865,18 @@ def run_variant(
                         x_prop1 = x_prop_demcz
                         snooker_log_jac = jnp.float64(0.0)
 
-                    # Stage 1: MH acceptance (with optional snooker Jacobian)
+                    # Stage 1: MH acceptance (with optional snooker Jacobian).
+                    # Sanitize lp_prop and the Jacobian to -inf when non-finite,
+                    # and auto-reject any proposal at/below lp_dead. This makes
+                    # the infeasibility floor reflecting (closes the snooker
+                    # outward-pump runaway) and closes the +inf-Jacobian entry path.
                     lp_prop1 = lp_eval(log_prob_fn, x_prop1)
                     log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
-                    accept1 = log_u1 < (lp_prop1 - lp + snooker_log_jac)
+                    snooker_log_jac = jnp.where(
+                        jnp.isfinite(snooker_log_jac), snooker_log_jac, -jnp.inf)
+                    lp_clean1 = jnp.where(jnp.isfinite(lp_prop1), lp_prop1, -jnp.inf)
+                    prop_ok1 = lp_clean1 > lp_dead
+                    accept1 = (log_u1 < (lp_clean1 - lp + snooker_log_jac)) & prop_ok1
 
                     if use_delayed_rejection:
                         # Stage 2: smaller step, new DE direction (no snooker — DR is the
@@ -883,7 +899,9 @@ def run_variant(
                         x_prop2 = x_full + mu_eff2 * d_full2
                         lp_prop2 = lp_eval(log_prob_fn, x_prop2)
                         log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
-                        accept2 = log_u2 < (lp_prop2 - lp)
+                        lp_clean2 = jnp.where(jnp.isfinite(lp_prop2), lp_prop2, -jnp.inf)
+                        prop_ok2 = lp_clean2 > lp_dead
+                        accept2 = (log_u2 < (lp_clean2 - lp)) & prop_ok2
 
                         # Stage 1 wins if accepted, else stage 2, else stay
                         x_new = jnp.where(accept1, x_prop1,
@@ -1396,11 +1414,13 @@ def run_variant(
                     d_full = jnp.zeros(n_dim, dtype=jnp.float64)
                     d_full = d_full.at[b_idx].add(d_block * mask)
 
-                    # Stage 1
+                    # Stage 1 — guarded MH (auto-reject non-finite / dead-zone).
                     x_prop1 = x_full + mu_eff * d_full
                     lp_prop1 = lp_eval(log_prob_fn, x_prop1)
                     log_u1 = jnp.log(jax.random.uniform(k_accept1, dtype=jnp.float64) + 1e-30)
-                    accept1 = log_u1 < (lp_prop1 - lp)
+                    lp_clean1 = jnp.where(jnp.isfinite(lp_prop1), lp_prop1, -jnp.inf)
+                    prop_ok1 = lp_clean1 > lp_dead
+                    accept1 = (log_u1 < (lp_clean1 - lp)) & prop_ok1
 
                     if use_delayed_rejection:
                         # Stage 2: smaller step, new random direction from covariance
@@ -1419,7 +1439,9 @@ def run_variant(
                         x_prop2 = x_full + mu_eff2 * d_full2
                         lp_prop2 = lp_eval(log_prob_fn, x_prop2)
                         log_u2 = jnp.log(jax.random.uniform(k_accept2, dtype=jnp.float64) + 1e-30)
-                        accept2 = log_u2 < (lp_prop2 - lp)
+                        lp_clean2 = jnp.where(jnp.isfinite(lp_prop2), lp_prop2, -jnp.inf)
+                        prop_ok2 = lp_clean2 > lp_dead
+                        accept2 = (log_u2 < (lp_clean2 - lp)) & prop_ok2
 
                         x_new = jnp.where(accept1, x_prop1,
                                 jnp.where(accept2, x_prop2, x_full))
@@ -1588,7 +1610,12 @@ def run_variant(
 
                 lp_prop = lp_eval(log_prob_fn, x_prop)
                 log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
-                accept = log_u < (lp_prop - lp + snooker_log_jac)
+                # Guarded MH: sanitize non-finite, auto-reject at/below lp_dead.
+                snooker_log_jac = jnp.where(
+                    jnp.isfinite(snooker_log_jac), snooker_log_jac, -jnp.inf)
+                lp_clean = jnp.where(jnp.isfinite(lp_prop), lp_prop, -jnp.inf)
+                prop_ok = lp_clean > lp_dead
+                accept = (log_u < (lp_clean - lp + snooker_log_jac)) & prop_ok
                 x_new = jnp.where(accept, x_prop, x_full)
                 lp_new = jnp.where(accept, lp_prop, lp)
                 return x_new, lp_new, wk
@@ -1721,12 +1748,18 @@ def run_variant(
                     x_prop = x_prop_demcz
                     snooker_log_jac = jnp.float64(0.0)
 
-                # Conditional log_prob for MH ratio
+                # Conditional log_prob for MH ratio.
+                # Guarded MH: sanitize non-finite Jacobian / cond_lp, auto-reject
+                # at/below lp_dead — same protection as the joint paths.
                 cond_lp_old = conditional_log_prob_fn(x_full, stream_idx)
                 cond_lp_new = conditional_log_prob_fn(x_prop, stream_idx)
-
+                snooker_log_jac = jnp.where(
+                    jnp.isfinite(snooker_log_jac), snooker_log_jac, -jnp.inf)
+                cond_lp_new_clean = jnp.where(
+                    jnp.isfinite(cond_lp_new), cond_lp_new, -jnp.inf)
+                prop_ok = cond_lp_new_clean > lp_dead
                 log_u = jnp.log(jax.random.uniform(k_accept, dtype=jnp.float64) + 1e-30)
-                accept = log_u < (cond_lp_new - cond_lp_old + snooker_log_jac)
+                accept = (log_u < (cond_lp_new_clean - cond_lp_old + snooker_log_jac)) & prop_ok
                 return x_prop, accept
 
             def _update_all_streams_one_walker(x_full, wk, walker_idx):
