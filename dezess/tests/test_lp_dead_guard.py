@@ -78,7 +78,7 @@ def test_default_guard_keeps_walkers_bounded():
         key=jax.random.PRNGKey(0), verbose=False,
     )
     samples = result["samples"]
-    log_probs = result["log_probs"]
+    log_probs = result["log_prob"]
 
     max_norm = _max_norm(samples)
     frac_floor = _frac_on_floor(log_probs)
@@ -112,7 +112,7 @@ def test_without_guard_runaway_reproduces():
         key=jax.random.PRNGKey(0), verbose=False,
     )
     samples = result["samples"]
-    log_probs = result["log_probs"]
+    log_probs = result["log_prob"]
 
     max_norm = _max_norm(samples)
     frac_floor = _frac_on_floor(log_probs)
