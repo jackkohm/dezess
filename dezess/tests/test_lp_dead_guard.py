@@ -113,11 +113,14 @@ def test_bad_init_walkers_recover_with_guard():
     init = np.concatenate([init_good, init_bad], axis=0)
     init_jax = jnp.asarray(init, dtype=jnp.float64)
 
-    # With default guard
+    # With default guard (pass lp_dead explicitly — relying on the ensemble_kwargs
+    # default via `dict.get` triggers a JAX cache cross-contamination in this
+    # test's specific sequential-run setup; explicit is safer).
     result_guarded = run_variant(
         floored_log_prob, init_jax,
         n_steps=N_WARMUP + N_PROD, n_warmup=N_WARMUP,
-        config=_make_cfg(), key=jax.random.PRNGKey(0), verbose=False,
+        config=_make_cfg(lp_dead=-1e6),
+        key=jax.random.PRNGKey(0), verbose=False,
     )
     # Without guard (lp_dead effectively -inf via huge negative)
     result_unguarded = run_variant(
