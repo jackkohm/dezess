@@ -99,7 +99,7 @@ def nuts_step(q, lp, grad_q, key, step_size, inv_mass_diag,
     H0 = -lp + kinetic_energy(p0, inv_mass_diag)
 
     init = _State(
-        i=jnp.int32(0),
+        i=jnp.asarray(0, jnp.int64),
         theta_minus=q, r_minus=p0, grad_minus=grad_q,
         theta_plus=q, r_plus=p0, grad_plus=grad_q,
         theta_prop=q, lp_prop=lp,
@@ -115,8 +115,8 @@ def nuts_step(q, lp, grad_q, key, step_size, inv_mass_diag,
         stop=jnp.bool_(False),
         diverged=jnp.bool_(False),
         sum_accept=jnp.float64(0.0),
-        n_leaf=jnp.int32(0),
-        depth=jnp.int32(0),
+        n_leaf=jnp.asarray(0, jnp.int64),
+        depth=jnp.asarray(0, jnp.int64),
         key=key,
     )
 
@@ -127,8 +127,8 @@ def nuts_step(q, lp, grad_q, key, step_size, inv_mass_diag,
         i = s.i
         ip1 = i + 1
         # doubling index j = #{k in 1..D : i+1 >= 2^k}; within-subtree m = 1..2^j
-        j = jnp.sum((ip1 >= jnp.left_shift(1, levels)).astype(jnp.int32))
-        pow2j = jnp.left_shift(jnp.int32(1), j)
+        j = jnp.sum((ip1 >= jnp.left_shift(1, levels)).astype(jnp.int64))
+        pow2j = jnp.left_shift(jnp.asarray(1, jnp.int64), j)
         m = i - (pow2j - 1) + 1
         is_new = (m == 1)
         is_last = (m == pow2j)
