@@ -96,12 +96,16 @@ def cfg_bgmh(block_sizes, cp, dr, name):
     )
 
 
+# Each entry: (label, config, evals_per_step_per_walker).
+# For slice: scale_aware with n_expand=2, n_shrink=8 → up to 10 evals worst case,
+# but typically 3-5; we use 4 as the empirical average for normalization.
+# For MH: evals = n_blocks * (1 stage1 + 1 stage2 if DR else 0).
 CONFIGS = [
-    ("slice cp=0 (ref)",        cfg_slice(0.0)),
-    ("bg_MH+DR 1blk cp=0.5",    cfg_bgmh([NDIM], 0.5, True,  "bgmh_1blk_dr")),
-    ("bg_MH    1blk cp=0.5",    cfg_bgmh([NDIM], 0.5, False, "bgmh_1blk_nodr")),
-    ("bg_MH+DR 2blk cp=0.5",    cfg_bgmh([POT_DIM, NUIS_DIM], 0.5, True,  "bgmh_2blk_dr")),
-    ("bg_MH    2blk cp=0.5",    cfg_bgmh([POT_DIM, NUIS_DIM], 0.5, False, "bgmh_2blk_nodr")),
+    ("slice cp=0 (ref)",        cfg_slice(0.0),                                 4),
+    ("bg_MH+DR 1blk cp=0.5",    cfg_bgmh([NDIM], 0.5, True,  "bgmh_1blk_dr"),   2),
+    ("bg_MH    1blk cp=0.5",    cfg_bgmh([NDIM], 0.5, False, "bgmh_1blk_nodr"), 1),
+    ("bg_MH+DR 2blk cp=0.5",    cfg_bgmh([POT_DIM, NUIS_DIM], 0.5, True,  "bgmh_2blk_dr"),   4),
+    ("bg_MH    2blk cp=0.5",    cfg_bgmh([POT_DIM, NUIS_DIM], 0.5, False, "bgmh_2blk_nodr"), 2),
 ]
 
 
@@ -127,18 +131,18 @@ for alpha in ALPHAS:
     sd = np.sqrt(np.diag(true_cov))
     rho_emp = np.abs(true_cov[:POT_DIM, POT_DIM:] / np.outer(sd[:POT_DIM], sd[POT_DIM:])).max()
 
-    print(f"\n{'=' * 110}")
+    print(f"\n{'=' * 120}")
     print(f"  DR on/off — α = {alpha}  (max |cross-block corr| in target: {rho_emp:.3f})")
     print(f"  {NDIM}D, blocks=[{POT_DIM}, {NUIS_DIM}], {N_WALKERS} walkers, "
           f"{N_WARMUP}+{N_PROD} steps, {N_SEEDS} seeds")
-    print(f"{'=' * 110}")
-    hdr = (f"  {'Setup':<24s} | {'seed':>4s} | {'ESS_min':>8s} | {'ESS/s':>6s} | "
+    print(f"{'=' * 120}")
+    hdr = (f"  {'Setup':<24s} | {'seed':>4s} | {'ESS_min':>8s} | {'ESS/eval':>9s} | {'ESS/s':>6s} | "
            f"{'ACF50':>6s} | {'ACF200':>6s} | {'Fro%':>5s} | {'wall':>6s}")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
-    results = {label: [] for label, _ in CONFIGS}
-    for label, cfg in CONFIGS:
+    results = {label: [] for label, _, _ in CONFIGS}
+    for label, cfg, evals_per_step in CONFIGS:
         for seed in range(N_SEEDS):
             init = make_init(seed, M)
             t0 = time.time()
@@ -152,52 +156,68 @@ for alpha in ALPHAS:
             ess = compute_ess(samples)
             ess_min = float(ess.min())
             ess_per_s = ess_min / max(wall, 1e-9)
+            # ESS per total log_prob eval (across the whole ensemble & all prod steps).
+            # Total evals = n_prod * evals_per_step * n_walkers.
+            total_evals = N_PROD * evals_per_step * N_WALKERS
+            ess_per_eval_micro = ess_min / total_evals * 1e6   # micro-ESS per eval
             emp_cov = np.cov(flat, rowvar=False)
             fro_rel = np.linalg.norm(emp_cov - true_cov) / np.linalg.norm(true_cov)
             acf = autocorr_at_lags(samples, LAGS)
             acf_x0 = acf[:, 0]
             results[label].append({
                 "ess_min": ess_min, "ess_per_s": ess_per_s,
+                "ess_per_eval": ess_per_eval_micro,
+                "evals_per_step": evals_per_step,
                 "acf": [float(v) for v in acf_x0],
                 "fro_rel": float(fro_rel), "wall": wall,
             })
-            print(f"  {label:<24s} | {seed:>4d} | {ess_min:>8.1f} | {ess_per_s:>6.1f} | "
-                  f"{acf_x0[0]:>6.3f} | {acf_x0[1]:>6.3f} | "
+            print(f"  {label:<24s} | {seed:>4d} | {ess_min:>8.1f} | {ess_per_eval_micro:>9.2f} | "
+                  f"{ess_per_s:>6.1f} | {acf_x0[0]:>6.3f} | {acf_x0[1]:>6.3f} | "
                   f"{fro_rel*100:>4.1f}% | {wall:>5.1f}s", flush=True)
             gc.collect()
     all_results[alpha] = results
 
 
-print(f"\n\n{'#' * 110}")
-print(f"  SUMMARY (mean across {N_SEEDS} seeds) — DR pays its 2x cost iff ESS/s improves")
-print(f"{'#' * 110}")
+print(f"\n\n{'#' * 120}")
+print(f"  SUMMARY (mean across {N_SEEDS} seeds) — DR pays its 2x eval cost iff ESS/eval improves")
+print(f"{'#' * 120}")
 for alpha in ALPHAS:
     print(f"\n  cross-block α = {alpha}")
-    hdr2 = (f"  {'Setup':<24s} | {'ESS_min':>8s} | {'ESS/s':>6s} | "
+    hdr2 = (f"  {'Setup':<24s} | {'ESS_min':>8s} | {'ESS/eval':>9s} | {'ESS/s':>6s} | "
             f"{'ACF50':>6s} | {'ACF200':>6s} | {'Fro%':>5s} | {'wall':>7s}")
     print(hdr2)
     print("  " + "-" * (len(hdr2) - 2))
-    for label, _ in CONFIGS:
+    for label, _, _ in CONFIGS:
         runs = all_results[alpha][label]
         em_min = np.mean([r["ess_min"] for r in runs])
+        epe   = np.mean([r["ess_per_eval"] for r in runs])
         eps   = np.mean([r["ess_per_s"] for r in runs])
         a50   = np.mean([r["acf"][0] for r in runs])
         a200  = np.mean([r["acf"][1] for r in runs])
         fro   = np.mean([r["fro_rel"] for r in runs])
         w     = np.mean([r["wall"] for r in runs])
-        print(f"  {label:<24s} | {em_min:>8.1f} | {eps:>6.1f} | "
+        print(f"  {label:<24s} | {em_min:>8.1f} | {epe:>9.2f} | {eps:>6.1f} | "
               f"{a50:>6.3f} | {a200:>6.3f} | {fro*100:>4.1f}% | {w:>6.1f}s", flush=True)
 
-# Compute the DR-vs-no-DR ratio per ρ for the headline answer
-print(f"\n\n{'#' * 110}")
-print(f"  DR / no-DR ESS/s RATIO  (>1 means DR pays its cost, <1 means it costs more than it gives)")
-print(f"{'#' * 110}")
-print(f"  {'α':>6s} | {'1blk DR/noDR':>14s} | {'2blk DR/noDR':>14s}")
+# Headline answer: DR-vs-no-DR ratios for both ESS/eval (the metric that matters
+# when log_prob is expensive) and ESS/s (when log_prob is cheap or GPU-saturated).
+print(f"\n\n{'#' * 120}")
+print(f"  HEADLINE: DR / no-DR RATIOS  (>1 = DR wins at this metric, <1 = DR is a net loss)")
+print(f"  ESS/eval is the metric that matters when log_prob is expensive (your Sanders case).")
+print(f"{'#' * 120}")
+print(f"  {'α':>6s} | {'1blk DR/noDR':>14s} {'(ESS/eval)':>10s} | {'(ESS/s)':>9s} | "
+      f"{'2blk DR/noDR':>14s} {'(ESS/eval)':>10s} | {'(ESS/s)':>9s}")
 for alpha in ALPHAS:
-    r1_dr = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH+DR 1blk cp=0.5"]])
-    r1_no = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH    1blk cp=0.5"]])
-    r2_dr = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH+DR 2blk cp=0.5"]])
-    r2_no = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH    2blk cp=0.5"]])
-    ratio_1 = r1_dr / max(r1_no, 1e-9)
-    ratio_2 = r2_dr / max(r2_no, 1e-9)
-    print(f"  {alpha:>6.1f} | {ratio_1:>14.2f}x | {ratio_2:>14.2f}x")
+    r1_dr_e = np.mean([r["ess_per_eval"] for r in all_results[alpha]["bg_MH+DR 1blk cp=0.5"]])
+    r1_no_e = np.mean([r["ess_per_eval"] for r in all_results[alpha]["bg_MH    1blk cp=0.5"]])
+    r2_dr_e = np.mean([r["ess_per_eval"] for r in all_results[alpha]["bg_MH+DR 2blk cp=0.5"]])
+    r2_no_e = np.mean([r["ess_per_eval"] for r in all_results[alpha]["bg_MH    2blk cp=0.5"]])
+    r1_dr_s = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH+DR 1blk cp=0.5"]])
+    r1_no_s = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH    1blk cp=0.5"]])
+    r2_dr_s = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH+DR 2blk cp=0.5"]])
+    r2_no_s = np.mean([r["ess_per_s"] for r in all_results[alpha]["bg_MH    2blk cp=0.5"]])
+    print(f"  {alpha:>6.1f} | "
+          f"{r1_dr_e/max(r1_no_e,1e-9):>14.2f}x          | "
+          f"{r1_dr_s/max(r1_no_s,1e-9):>9.2f}x | "
+          f"{r2_dr_e/max(r2_no_e,1e-9):>14.2f}x          | "
+          f"{r2_dr_s/max(r2_no_s,1e-9):>9.2f}x")
