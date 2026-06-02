@@ -38,6 +38,7 @@ from dezess.slice import fixed as fixed_slice, adaptive_budget, delayed_rejectio
 from dezess.zmatrix import circular as circular_zmatrix, hierarchical as hierarchical_zmatrix, live as live_zmatrix
 # Ensemble modules
 from dezess.ensemble import standard as standard_ensemble, parallel_tempering, block_gibbs
+from dezess.ensemble import nuts_adapt
 from dezess.core.slice_sample import slice_sample_fixed
 
 jax.config.update("jax_enable_x64", True)
@@ -109,6 +110,55 @@ DEFAULT_CONFIG = VariantConfig(
 )
 
 
+def _run_nuts_variant(log_prob_fn, init_positions, n_steps, n_warmup, config,
+                      key, verbose, transform, mu):
+    """NUTS path for run_variant. Delegates to nuts_adapt.run_nuts and maps the
+    result into the standard run_variant dict. ensemble_kwargs keys:
+      mass_type ('diag'|'dense'|'identity', default 'diag'),
+      max_tree_depth (default 10), target_accept (default 0.8),
+      step_size0 (default `mu`).
+    """
+    ek = dict(config.ensemble_kwargs)
+    n_prod = n_steps - n_warmup
+    seed = int(jax.random.randint(key, (), 0, 2**31 - 1))
+    t0 = time.time()
+    res = nuts_adapt.run_nuts(
+        log_prob_fn, init_positions,
+        n_warmup=n_warmup, n_prod=n_prod,
+        mass_type=ek.get("mass_type", "diag"),
+        max_tree_depth=int(ek.get("max_tree_depth", 10)),
+        target_accept=float(ek.get("target_accept", 0.8)),
+        step_size0=float(ek.get("step_size0", float(mu))),
+        seed=seed, verbose=verbose,
+    )
+    wall_time = time.time() - t0
+
+    samples = res["samples"]   # (n_prod, n_walkers, n_dim), original space
+    if transform is not None:
+        # NUTS sampled the (already transform-wrapped) log_prob in z-space;
+        # map z -> x for the returned samples.
+        _fwd = jax.jit(jax.vmap(transform.forward))
+        samples = np.stack([np.asarray(_fwd(jnp.asarray(samples[i])))
+                            for i in range(samples.shape[0])], axis=0)
+
+    return {
+        "samples": jnp.asarray(samples),
+        "log_prob": jnp.asarray(res["log_prob"]),
+        "mu": float(res["step_size"]),
+        "z_matrix": None,
+        "config": config,
+        "wall_time": wall_time,
+        "n_production": n_prod,
+        "diagnostics": {
+            "mean_tree_depth": res["mean_depth"],
+            "divergence_rate": res["div_rate"],
+            "step_size": res["step_size"],
+            "mass_type": res["mass_type"],
+            "L": res["L"],
+        },
+    }
+
+
 def run_variant(
     log_prob_fn: Callable[[Array], Array],
     init_positions: Array,
@@ -169,6 +219,15 @@ def run_variant(
         _original_log_prob = log_prob_fn
         def log_prob_fn(z, _fwd=transform.forward, _ldj=transform.log_det_jac, _lp=_original_log_prob):
             return _lp(_fwd(z)) + _ldj(z)
+
+    # --- NUTS dispatch ---
+    # NUTS bypasses the Z-matrix / direction / slice machinery entirely
+    # (gradient-based, each walker an independent chain). Handle it as an
+    # early branch before strategy resolution, which doesn't know "nuts".
+    if config.ensemble == "nuts":
+        return _run_nuts_variant(
+            log_prob_fn, init_positions, n_steps, n_warmup, config, key,
+            verbose, transform, mu)
 
     # Resolve strategies (validate names early for clear error messages)
     for name, registry, label in [
