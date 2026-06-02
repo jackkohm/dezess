@@ -113,7 +113,16 @@ for tname, tfn in TARGETS:
                               verbose=False)
             wall = time.time() - t0
             samples = np.array(res["samples"])
-            ess = float(compute_ess(samples).min())
+            # ESS: a single chain is undefined for the multi-chain estimator,
+            # so split a 1-chain run into pseudo-chains just for the ESS number.
+            if samples.shape[1] == 1:
+                n = samples.shape[0]
+                npc = 8
+                seg = n // npc
+                ess_in = samples[:seg * npc, 0, :].reshape(npc, seg, NDIM).transpose(1, 0, 2)
+            else:
+                ess_in = samples
+            ess = float(compute_ess(ess_in).min())
             flat = samples.reshape(-1, NDIM)
             fro = np.linalg.norm(np.cov(flat, rowvar=False) - cov) / np.linalg.norm(cov)
             fro_l.append(fro); ess_l.append(ess)

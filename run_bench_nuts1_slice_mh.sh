@@ -18,4 +18,7 @@ export OMP_NUM_THREADS=1; export OPENBLAS_NUM_THREADS=1; export MKL_NUM_THREADS=
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then cd "${SLURM_SUBMIT_DIR}"; fi
 cd GIVEMEPotential/third_party/dezess
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+echo "=== re-run mass-adapt test (robust _estimate_L) ==="
+conda run --no-capture-output -p /gpfs/scrubbed/jackkohm/conda-envs/Astro python -u dezess/tests/test_nuts_adapt.py
+echo "=== NUTS(1ch) vs slice vs bg_MH+DR ==="
 conda run --no-capture-output -p /gpfs/scrubbed/jackkohm/conda-envs/Astro python -u bench_nuts1_slice_mh.py

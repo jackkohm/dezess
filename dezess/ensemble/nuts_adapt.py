@@ -61,23 +61,37 @@ class _DualAvg:
 def _estimate_L(samples_2d, mass_type, d):
     """Build the whitening matrix L (Σ = L Lᵀ) from pooled warmup samples.
 
-    samples_2d: (n, d). Shrinkage toward a small diagonal (Stan-style).
+    samples_2d: (n, d). Shrinkage toward unit-variance (Stan-style). Robust
+    to few/near-singular samples: dense falls back to diagonal when there
+    aren't enough samples for a reliable covariance, and the Cholesky retries
+    with growing jitter before falling back to the diagonal.
     """
     n = samples_2d.shape[0]
     shrink = n / (n + 5.0)
     if mass_type == "identity":
         return np.eye(d)
+
+    var = samples_2d.var(axis=0)
+    var = shrink * var + (1 - shrink) * 1.0          # shrink toward unit variance
+    var = np.maximum(var, 1e-8)
+    diag_L = np.diag(np.sqrt(var))
+
     if mass_type == "diag":
-        var = samples_2d.var(axis=0)
-        var = shrink * var + (1 - shrink) * 1e-3
-        var = np.maximum(var, 1e-8)
-        return np.diag(np.sqrt(var))
+        return diag_L
     if mass_type == "dense":
+        # Need clearly more samples than dimensions for a usable dense cov.
+        if n < 2 * d:
+            return diag_L
         cov = np.cov(samples_2d, rowvar=False)
-        cov = shrink * cov + (1 - shrink) * 1e-3 * np.eye(d)
-        # symmetrize + jitter for a safe Cholesky
-        cov = 0.5 * (cov + cov.T) + 1e-9 * np.eye(d)
-        return np.linalg.cholesky(cov)
+        cov = shrink * cov + (1 - shrink) * np.eye(d)   # shrink toward I
+        cov = 0.5 * (cov + cov.T)
+        mean_diag = max(np.mean(np.diag(cov)), 1e-8)
+        for jit in (0.0, 1e-8, 1e-6, 1e-4, 1e-2):
+            try:
+                return np.linalg.cholesky(cov + jit * mean_diag * np.eye(d))
+            except np.linalg.LinAlgError:
+                continue
+        return diag_L     # last resort: diagonal whitening
     raise ValueError(f"unknown mass_type {mass_type!r}")
 
 
