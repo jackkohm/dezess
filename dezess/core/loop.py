@@ -111,12 +111,15 @@ DEFAULT_CONFIG = VariantConfig(
 
 
 def _run_nuts_variant(log_prob_fn, init_positions, n_steps, n_warmup, config,
-                      key, verbose, transform, mu):
+                      key, verbose, transform, mu, stream_path=None):
     """NUTS path for run_variant. Delegates to nuts_adapt.run_nuts and maps the
     result into the standard run_variant dict. ensemble_kwargs keys:
       mass_type ('diag'|'dense'|'identity', default 'diag'),
       max_tree_depth (default 10), target_accept (default 0.8),
       step_size0 (default `mu`).
+
+    If stream_path is given, production chunks + NUTS state stream to disk
+    (live-readable via read_streaming, resumable via resume_streaming).
     """
     ek = dict(config.ensemble_kwargs)
     n_prod = n_steps - n_warmup
@@ -130,6 +133,7 @@ def _run_nuts_variant(log_prob_fn, init_positions, n_steps, n_warmup, config,
         target_accept=float(ek.get("target_accept", 0.8)),
         step_size0=float(ek.get("step_size0", float(mu))),
         seed=seed, verbose=verbose,
+        stream_path=stream_path, config_name=config.name,
     )
     wall_time = time.time() - t0
 
@@ -227,7 +231,7 @@ def run_variant(
     if config.ensemble == "nuts":
         return _run_nuts_variant(
             log_prob_fn, init_positions, n_steps, n_warmup, config, key,
-            verbose, transform, mu)
+            verbose, transform, mu, stream_path=stream_path)
 
     # Resolve strategies (validate names early for clear error messages)
     for name, registry, label in [

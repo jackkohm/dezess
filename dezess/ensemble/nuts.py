@@ -243,5 +243,8 @@ def nuts_step(q, lp, grad_q, key, step_size, inv_mass_diag,
 
     grad_out = grad_fn(final.theta_prop)
     accept_stat = final.sum_accept / jnp.maximum(final.n_leaf, 1).astype(jnp.float64)
+    # Report number of doublings (= Stan/BlackJAX num_trajectory_expansions),
+    # which is the 0-indexed max doubling index + 1 (>=1 doubling always runs).
+    n_expansions = final.depth + 1
     return (final.theta_prop, final.lp_prop, grad_out, final.key,
-            accept_stat, final.depth, final.diverged)
+            accept_stat, n_expansions, final.diverged)

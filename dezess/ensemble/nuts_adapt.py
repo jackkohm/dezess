@@ -83,113 +83,145 @@ def _estimate_L(samples_2d, mass_type, d):
 
 def run_nuts(log_prob, init, n_warmup, n_prod, mass_type="diag",
              max_tree_depth=10, target_accept=0.8, step_size0=0.5, seed=0,
-             verbose=False):
+             verbose=False, L_init=None, step_size_init=None, skip_warmup=False,
+             stream_path=None, config_name="nuts", save_every=50):
     """Ensemble NUTS with warmup adaptation. Each walker is an independent chain.
 
-    Returns dict with samples (n_prod, n_walkers, d) in the ORIGINAL space,
-    log_prob, mean tree depth, divergence rate, final step_size, and L.
+    The leapfrog/NUTS step is JIT-compiled ONCE with the whitening matrix L
+    threaded as a dynamic argument, so changing L across mass-adaptation
+    windows (or on resume) does NOT trigger recompilation.
+
+    Resume: pass `skip_warmup=True` with `L_init` and `step_size_init` to skip
+    adaptation and run production directly with a frozen geometry.
+
+    Streaming: pass `stream_path` to write production chunks + NUTS state to
+    disk (live-readable via dezess.read_streaming, resumable via
+    dezess.resume_streaming).
+
+    Returns dict: samples (n_prod, n_walkers, d) in ORIGINAL space, log_prob,
+    mean_depth (doublings), div_rate, step_size, L, mass_type.
     """
     init = jnp.asarray(init, dtype=jnp.float64)
     n_walkers, d = init.shape
     D = int(max_tree_depth)
+    grad_orig = jax.grad(log_prob)
+    inv_mass = jnp.ones(d, dtype=jnp.float64)   # identity mass in whitened frame
 
-    # --- whitened-space NUTS factory (re-created when L changes) ---
-    def make_stepper(L):
-        L_jax = jnp.asarray(L, dtype=jnp.float64)
+    # --- ONE jit, L threaded as a dynamic arg (no re-jit when L changes) ---
+    def _whitened_step(xp, lp, g, k, ss, L):
+        def lp_white(z):
+            return log_prob(L @ z)
+        def grad_white(z):
+            return L.T @ grad_orig(L @ z)
+        return nuts.nuts_step(xp, lp, g, k, ss, inv_mass, lp_white, grad_white, D)
 
-        def lp_white(xp):
-            return log_prob(L_jax @ xp)
+    step = jax.jit(jax.vmap(_whitened_step, in_axes=(0, 0, 0, 0, None, None)))
+    _lp_white = jax.jit(jax.vmap(lambda xp, L: log_prob(L @ xp), in_axes=(0, None)))
+    _grad_white = jax.jit(jax.vmap(lambda xp, L: L.T @ grad_orig(L @ xp), in_axes=(0, None)))
+    to_white = jax.jit(jax.vmap(
+        lambda xi, L: jax.scipy.linalg.solve_triangular(L, xi, lower=True),
+        in_axes=(0, None)))
+    to_orig = jax.jit(jax.vmap(lambda xpi, L: L @ xpi, in_axes=(0, None)))
 
-        grad_white = jax.grad(lp_white)
-        inv_mass = jnp.ones(d, dtype=jnp.float64)   # identity mass in whitened frame
-
-        step = jax.jit(jax.vmap(
-            lambda xp, lp, g, k, ss: nuts.nuts_step(
-                xp, lp, g, k, ss, inv_mass, lp_white, grad_white, D),
-            in_axes=(0, 0, 0, 0, None)))
-        return step, lp_white, grad_white, L_jax
-
-    def to_white(x, L_jax):
-        # x' = L^{-1} x  (solve, per walker)
-        return jax.vmap(lambda xi: jax.scipy.linalg.solve_triangular(
-            L_jax, xi, lower=True))(x)
-
-    def to_orig(xp, L_jax):
-        return jax.vmap(lambda xpi: L_jax @ xpi)(xp)
-
-    # --- warmup with windowed mass + dual-averaging ---
-    L = np.eye(d)
-    step, lp_white, grad_white, L_jax = make_stepper(L)
-    xp = to_white(init, L_jax)
-    lp = jax.vmap(lp_white)(xp)
-    g = jax.vmap(grad_white)(xp)
     keys = jax.random.split(jax.random.PRNGKey(seed + 1), n_walkers)
 
-    da = _DualAvg(step_size0, target=target_accept)
-    step_size = step_size0
-
-    # schedule: init buffer (step-size only), growing mass windows, term buffer
-    init_buf = max(int(0.15 * n_warmup), 25)
-    term_buf = max(int(0.10 * n_warmup), 25)
-    mass_steps = n_warmup - init_buf - term_buf
-    # growing windows: 3 windows doubling in size
-    windows = []
-    if mass_steps > 0:
-        w = max(mass_steps // 7, 10)
-        used = 0
-        while used < mass_steps:
-            wlen = min(w, mass_steps - used)
-            windows.append(wlen)
-            used += wlen
-            w *= 2
-
-    def warmup_phase(n_steps, collect):
-        nonlocal xp, lp, g, keys, step_size
-        buf = []
-        for _ in range(n_steps):
-            xp, lp, g, keys, acc, depth, div = step(xp, lp, g, keys, step_size)
-            step_size = da.update(float(jnp.mean(acc)))
-            if collect:
-                buf.append(np.array(to_orig(xp, L_jax)))
-        return buf
-
-    # init buffer
-    warmup_phase(init_buf, collect=False)
-    # mass windows
-    for wi, wlen in enumerate(windows):
-        buf = warmup_phase(wlen, collect=True)
-        samples_win = np.concatenate(buf, axis=0).reshape(-1, d)  # pooled across walkers+steps
-        L = _estimate_L(samples_win, mass_type, d)
-        # rebuild stepper in the new whitened frame, re-express current walkers
-        x_cur = np.array(to_orig(xp, L_jax))
-        step, lp_white, grad_white, L_jax = make_stepper(L)
-        xp = to_white(jnp.asarray(x_cur), L_jax)
-        lp = jax.vmap(lp_white)(xp)
-        g = jax.vmap(grad_white)(xp)
-        # reset dual averaging around the new geometry
-        da = _DualAvg(step_size, target=target_accept)
+    if skip_warmup:
+        # Resume / frozen-geometry mode.
+        L = np.eye(d) if L_init is None else np.asarray(L_init, dtype=np.float64)
+        step_size = float(step_size_init if step_size_init is not None else step_size0)
+        L_jax = jnp.asarray(L, dtype=jnp.float64)
+        xp = to_white(init, L_jax)
         if verbose:
-            print(f"  [nuts warmup] window {wi+1}/{len(windows)} "
-                  f"({wlen} steps) -> step_size={step_size:.4f}", flush=True)
-    # term buffer (freeze mass, finalize step size)
-    warmup_phase(term_buf, collect=False)
-    step_size = da.finalize()
-    if verbose:
-        print(f"  [nuts warmup] done. final step_size={step_size:.4f}, "
-              f"mass_type={mass_type}", flush=True)
+            print(f"  [nuts] resume/frozen: step_size={step_size:.4f}, "
+                  f"mass dims={L.shape}", flush=True)
+    else:
+        # --- warmup: windowed mass + dual-averaging ---
+        L = np.eye(d)
+        L_jax = jnp.asarray(L, dtype=jnp.float64)
+        xp = to_white(init, L_jax)
+        da = _DualAvg(step_size0, target=target_accept)
+        step_size = step_size0
+
+        init_buf = max(int(0.15 * n_warmup), 25)
+        term_buf = max(int(0.10 * n_warmup), 25)
+        mass_steps = n_warmup - init_buf - term_buf
+        windows = []
+        if mass_steps > 0:
+            w = max(mass_steps // 7, 10)
+            used = 0
+            while used < mass_steps:
+                wlen = min(w, mass_steps - used)
+                windows.append(wlen)
+                used += wlen
+                w *= 2
+
+        def warmup_phase(n_steps, collect):
+            nonlocal xp, keys, step_size
+            buf = []
+            for _ in range(n_steps):
+                xp, lp_, g_, keys, acc, depth, div = step(
+                    xp, _lp_white(xp, L_jax), _grad_white(xp, L_jax), keys,
+                    step_size, L_jax)
+                step_size = da.update(float(jnp.mean(acc)))
+                if collect:
+                    buf.append(np.array(to_orig(xp, L_jax)))
+            return buf
+
+        warmup_phase(init_buf, collect=False)
+        for wi, wlen in enumerate(windows):
+            buf = warmup_phase(wlen, collect=True)
+            samples_win = np.concatenate(buf, axis=0).reshape(-1, d)
+            x_cur = np.array(to_orig(xp, L_jax))
+            L = _estimate_L(samples_win, mass_type, d)
+            L_jax = jnp.asarray(L, dtype=jnp.float64)   # value change only -> no re-jit
+            xp = to_white(jnp.asarray(x_cur), L_jax)
+            da = _DualAvg(step_size, target=target_accept)
+            if verbose:
+                print(f"  [nuts warmup] window {wi+1}/{len(windows)} "
+                      f"({wlen} steps) -> step_size={step_size:.4f}", flush=True)
+        warmup_phase(term_buf, collect=False)
+        step_size = da.finalize()
+        if verbose:
+            print(f"  [nuts warmup] done. final step_size={step_size:.4f}, "
+                  f"mass_type={mass_type}", flush=True)
 
     # --- production (frozen L, frozen step size) ---
+    streamer = None
+    if stream_path is not None:
+        from dezess.streaming import Streamer
+        streamer = Streamer(stream_path, n_walkers, d, n_prod, config_name,
+                            z_capacity=0)
+        streamer.open_chunk()
+
     samples = np.empty((n_prod, n_walkers, d))
     lps = np.empty((n_prod, n_walkers))
     depths = np.empty((n_prod, n_walkers))
     divs = np.empty((n_prod, n_walkers))
-    for t in range(n_prod):
-        xp, lp, g, keys, acc, depth, div = step(xp, lp, g, keys, step_size)
-        x_orig = to_orig(xp, L_jax)
-        samples[t] = np.array(x_orig)
-        lps[t] = np.array(lp)
-        depths[t] = np.array(depth)
-        divs[t] = np.array(div)
+    batch_s, batch_lp = [], []
+    try:
+        for t in range(n_prod):
+            xp, lp_, g_, keys, acc, depth, div = step(
+                xp, _lp_white(xp, L_jax), _grad_white(xp, L_jax), keys,
+                step_size, L_jax)
+            x_orig = np.array(to_orig(xp, L_jax))
+            lp_np = np.array(lp_)
+            samples[t] = x_orig
+            lps[t] = lp_np
+            depths[t] = np.array(depth)
+            divs[t] = np.array(div)
+            if streamer is not None:
+                batch_s.append(x_orig)
+                batch_lp.append(lp_np)
+                if len(batch_s) >= save_every or t == n_prod - 1:
+                    streamer.append_batch(np.stack(batch_s), np.stack(batch_lp))
+                    streamer.save_nuts_state(
+                        last_positions=x_orig, last_lps=lp_np,
+                        step_size=step_size, L=np.asarray(L),
+                        max_tree_depth=D, n_steps_done_in_chunk=t + 1)
+                    batch_s, batch_lp = [], []
+    finally:
+        if streamer is not None:
+            streamer.close()
 
     return {
         "samples": samples,

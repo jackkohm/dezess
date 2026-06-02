@@ -155,6 +155,33 @@ class Streamer:
         manifest["steps_done_per_chunk"] = per_chunk_done
         _write_json_atomic(self.stream_path / "manifest.json", manifest)
 
+    def save_nuts_state(
+        self,
+        *,
+        last_positions: np.ndarray,
+        last_lps: np.ndarray,
+        step_size: float,
+        L: np.ndarray,
+        max_tree_depth: int,
+        n_steps_done_in_chunk: int,
+    ) -> None:
+        """Atomically save NUTS sampler state (positions, step size, whitening
+        matrix L, max tree depth). Marks the manifest sampler_type='nuts' so
+        resume_streaming routes to the NUTS path."""
+        state = self.stream_path / "state"
+        _save_npy_atomic(state / "last_positions.npy", last_positions)
+        _save_npy_atomic(state / "last_lps.npy", last_lps)
+        _save_npy_atomic(state / "nuts_step_size.npy", np.float64(step_size))
+        _save_npy_atomic(state / "nuts_L.npy", np.asarray(L, dtype=np.float64))
+        _save_npy_atomic(state / "nuts_max_tree_depth.npy", np.int64(max_tree_depth))
+
+        manifest = _read_manifest(self.stream_path)
+        manifest["sampler_type"] = "nuts"
+        per_chunk_done = manifest.get("steps_done_per_chunk", {})
+        per_chunk_done[f"chunk_{self._chunk_idx:03d}"] = int(n_steps_done_in_chunk)
+        manifest["steps_done_per_chunk"] = per_chunk_done
+        _write_json_atomic(self.stream_path / "manifest.json", manifest)
+
     def close(self) -> None:
         """Final flush; mmaps will be closed when garbage-collected."""
         if self._samples_mm is not None:
@@ -277,6 +304,28 @@ def resume_streaming(
         raise FileNotFoundError(f"no state found at {state}")
 
     manifest = _read_manifest(stream_path)
+
+    # --- NUTS resume path ---
+    if manifest.get("sampler_type") == "nuts":
+        from dezess.ensemble import nuts_adapt
+        init = np.load(state / "last_positions.npy")
+        step_size = float(np.load(state / "nuts_step_size.npy"))
+        L = np.load(state / "nuts_L.npy")
+        D = int(np.load(state / "nuts_max_tree_depth.npy"))
+        if verbose:
+            per_chunk = manifest.get("steps_done_per_chunk", {})
+            n_done_total = sum(per_chunk.values())
+            print(f"dezess.resume_streaming[nuts]: continuing from "
+                  f"{n_done_total} steps (step_size={step_size:.4f}, "
+                  f"mass dims={L.shape})", flush=True)
+        seed_val = 0 if key is None else int(key[0])
+        return nuts_adapt.run_nuts(
+            log_prob_fn, init, n_warmup=0, n_prod=int(n_more_steps),
+            skip_warmup=True, L_init=L, step_size_init=step_size,
+            max_tree_depth=D, seed=seed_val, verbose=verbose,
+            stream_path=str(stream_path),
+            config_name=str(manifest.get("config_name", "nuts")))
+
     if config is None:
         from dezess.benchmark.registry import VARIANTS
         config_name = str(manifest.get("config_name", ""))
