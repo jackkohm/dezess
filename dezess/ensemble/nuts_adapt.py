@@ -159,7 +159,7 @@ def run_nuts(log_prob, init, n_warmup, n_prod, mass_type="diag",
             nonlocal xp, keys, step_size
             buf = []
             for _ in range(n_steps):
-                xp, lp_, g_, keys, acc, depth, div = step(
+                xp, lp_, g_, keys, acc, depth, div, nleaf = step(
                     xp, _lp_white(xp, L_jax), _grad_white(xp, L_jax), keys,
                     step_size, L_jax)
                 step_size = da.update(float(jnp.mean(acc)))
@@ -197,10 +197,11 @@ def run_nuts(log_prob, init, n_warmup, n_prod, mass_type="diag",
     lps = np.empty((n_prod, n_walkers))
     depths = np.empty((n_prod, n_walkers))
     divs = np.empty((n_prod, n_walkers))
+    total_grad_evals = 0   # total leapfrog steps = gradient evaluations
     batch_s, batch_lp = [], []
     try:
         for t in range(n_prod):
-            xp, lp_, g_, keys, acc, depth, div = step(
+            xp, lp_, g_, keys, acc, depth, div, nleaf = step(
                 xp, _lp_white(xp, L_jax), _grad_white(xp, L_jax), keys,
                 step_size, L_jax)
             x_orig = np.array(to_orig(xp, L_jax))
@@ -209,6 +210,7 @@ def run_nuts(log_prob, init, n_warmup, n_prod, mass_type="diag",
             lps[t] = lp_np
             depths[t] = np.array(depth)
             divs[t] = np.array(div)
+            total_grad_evals += int(np.sum(np.array(nleaf)))
             if streamer is not None:
                 batch_s.append(x_orig)
                 batch_lp.append(lp_np)
@@ -231,4 +233,5 @@ def run_nuts(log_prob, init, n_warmup, n_prod, mass_type="diag",
         "step_size": float(step_size),
         "L": np.array(L),
         "mass_type": mass_type,
+        "grad_evals": int(total_grad_evals),   # total leapfrog steps in production
     }

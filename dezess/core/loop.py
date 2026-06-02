@@ -159,6 +159,7 @@ def _run_nuts_variant(log_prob_fn, init_positions, n_steps, n_warmup, config,
             "step_size": res["step_size"],
             "mass_type": res["mass_type"],
             "L": res["L"],
+            "grad_evals": res.get("grad_evals", 0),
         },
     }
 

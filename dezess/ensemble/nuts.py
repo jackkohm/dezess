@@ -247,4 +247,4 @@ def nuts_step(q, lp, grad_q, key, step_size, inv_mass_diag,
     # which is the 0-indexed max doubling index + 1 (>=1 doubling always runs).
     n_expansions = final.depth + 1
     return (final.theta_prop, final.lp_prop, grad_out, final.key,
-            accept_stat, n_expansions, final.diverged)
+            accept_stat, n_expansions, final.diverged, final.n_leaf)

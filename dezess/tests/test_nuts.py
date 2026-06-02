@@ -41,7 +41,7 @@ def _run_nuts(log_prob, d, n_walkers, n_steps, step_size, inv_mass=None,
     depths = np.empty((n_steps, n_walkers))
     divs = np.empty((n_steps, n_walkers))
     for t in range(n_steps):
-        q, lp, g, keys, acc, depth, div = step(q, lp, g, keys)
+        q, lp, g, keys, acc, depth, div, _nleaf = step(q, lp, g, keys)
         samples[t] = np.array(q)
         depths[t] = np.array(depth)
         divs[t] = np.array(div)
