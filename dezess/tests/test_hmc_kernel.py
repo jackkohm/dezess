@@ -13,7 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 jax.config.update("jax_enable_x64", True)
 
+import dezess
+print(f"dezess imported from: {dezess.__file__}")
 from dezess.ensemble import hmc
+print(f"hmc imported from:    {hmc.__file__}")
 
 
 def test_leapfrog_energy_conservation():

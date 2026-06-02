@@ -17,4 +17,7 @@ export OMP_NUM_THREADS=1; export OPENBLAS_NUM_THREADS=1; export MKL_NUM_THREADS=
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then cd "${SLURM_SUBMIT_DIR}"; fi
 cd GIVEMEPotential/third_party/dezess
+# Force THIS workspace's dezess onto the path (an editable install may point at
+# a sibling workspace; tests run from dezess/tests/ otherwise resolve to it).
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 conda run --no-capture-output -p /gpfs/scrubbed/jackkohm/conda-envs/Astro python -u dezess/tests/test_hmc_kernel.py
