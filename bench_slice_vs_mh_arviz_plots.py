@@ -97,8 +97,8 @@ CONFIGS = [
 
 def diagnose(samples_3d):
     """samples_3d: (n_steps, n_walkers, n_dim). Returns full diagnostic dict."""
-    chains = np.array(samples_3d).transpose((1, 0, 2))         # (walkers, steps, dim)
-    idata = az.from_dict({"theta": chains[None]})
+    chains = np.array(samples_3d).transpose((1, 0, 2))         # (n_walkers, n_steps, n_dim) = (chains, draws, param)
+    idata = az.from_dict(posterior={"theta": chains})
 
     rhat = az.rhat(idata, method="rank")["theta"].values
     ess_b = az.ess(idata, method="bulk")["theta"].values

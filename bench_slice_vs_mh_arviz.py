@@ -93,8 +93,8 @@ CONFIGS = [
 
 def arviz_diagnostics(samples_3d):
     """samples_3d: (n_steps, n_walkers, n_dim). Returns dict of arviz metrics."""
-    chains = np.array(samples_3d).transpose((1, 0, 2))   # (n_walkers, n_steps, n_dim)
-    idata = az.from_dict({"theta": chains[None]})         # add var dim wrapper
+    chains = np.array(samples_3d).transpose((1, 0, 2))   # (n_walkers, n_steps, n_dim) = (chains, draws, param)
+    idata = az.from_dict(posterior={"theta": chains})
 
     rhat = az.rhat(idata, method="rank")["theta"].values  # (n_dim,)
     ess_b = az.ess(idata, method="bulk")["theta"].values  # (n_dim,)
