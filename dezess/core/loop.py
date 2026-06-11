@@ -353,6 +353,17 @@ def run_variant(
     # (block_mh_step, block_mh_cov_step, block_conditional_step). Default
     # -1e6 catches the common -1e7 / -1e8 infeasibility floors.
     lp_dead = float(ens_kwargs.get("lp_dead", -1e6))
+    # mh_target_accept: stage-1 acceptance the warmup tuner drives mu toward
+    # on the block-MH paths. Default 0.234 = the ESJD optimum for chord
+    # proposals at stationarity (accept = 2*Phi(-t/2); maximizing t^2*accept
+    # gives t ~ 2.38 sigma, accept ~ 0.234). The legacy br encoding
+    # (2T-1 / 1) structurally targeted 0.5 regardless of n_expand, which
+    # runs at ~69% of optimal ESJD. Ignored by slice paths (real bracket
+    # ratios) and by the NUTS path (which reads target_accept separately).
+    mh_target_accept = float(ens_kwargs.get("target_accept", 0.234))
+    if not (0.0 < mh_target_accept < 1.0):
+        raise ValueError(
+            f"target_accept must be in (0, 1), got {mh_target_accept}")
     conditional_log_prob_fn = ens_kwargs.get("conditional_log_prob", None)
     use_conditional = conditional_log_prob_fn is not None and use_block_mh
 
@@ -978,8 +989,14 @@ def run_variant(
                         lp_new = jnp.where(accept1, lp_prop1, lp)
                         either_accepted = accept1
 
+                    # Tuner-facing acceptance encoding: mean(br) == TARGET_RATIO
+                    # (= n_expand+1) exactly when realized acceptance equals
+                    # mh_target_accept, so the unchanged warmup tuner
+                    # (mu *= (ratio_ema/TARGET)^0.5) drives acceptance to the
+                    # configured target instead of the legacy hardwired 0.5.
                     target = jnp.float64(n_expand + 1)
-                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
+                    br = jnp.where(either_accepted,
+                                   target / mh_target_accept, 0.0)
                     return x_new, lp_new, wk, br
 
                 k, k_walkers = jax.random.split(k)
@@ -1517,8 +1534,14 @@ def run_variant(
                         lp_new = jnp.where(accept1, lp_prop1, lp)
                         either_accepted = accept1
 
+                    # Tuner-facing acceptance encoding: mean(br) == TARGET_RATIO
+                    # (= n_expand+1) exactly when realized acceptance equals
+                    # mh_target_accept, so the unchanged warmup tuner
+                    # (mu *= (ratio_ema/TARGET)^0.5) drives acceptance to the
+                    # configured target instead of the legacy hardwired 0.5.
                     target = jnp.float64(n_expand + 1)
-                    br = jnp.where(either_accepted, 2.0 * target - 1.0, 1.0)
+                    br = jnp.where(either_accepted,
+                                   target / mh_target_accept, 0.0)
                     return x_new, lp_new, wk, br
 
                 k, k_walkers = jax.random.split(k)
